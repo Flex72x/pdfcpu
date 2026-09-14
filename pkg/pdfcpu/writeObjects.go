@@ -603,12 +603,37 @@ func writeStreamDictObject(ctx *model.Context, objNr, genNr int, sd types.Stream
 	return nil
 }
 
+// isPageDestinationEntry distinguishes GoTo action destinations from other D
+// entries, including the distance number-format array in a Measure dictionary.
+// S may itself be an indirect name object.
+func isPageDestinationEntry(ctx *model.Context, d types.Dict, key string) (bool, error) {
+	if !ctx.WritingPages {
+		return false, nil
+	}
+	if key == "Dest" {
+		return true, nil
+	}
+	if key != "D" {
+		return false, nil
+	}
+	s, err := ctx.Dereference(d["S"])
+	if err != nil {
+		return false, err
+	}
+	action, ok := s.(types.Name)
+	return ok && types.MemberOf(action.Value(), []string{"GoTo", "GoToR", "GoToE"}), nil
+}
+
 func writeDirectObject(ctx *model.Context, o types.Object) error {
 	switch o := o.(type) {
 
 	case types.Dict:
 		for k, v := range o {
-			if ctx.WritingPages && (k == "Dest" || k == "D") {
+			destination, err := isPageDestinationEntry(ctx, o, k)
+			if err != nil {
+				return err
+			}
+			if destination {
 				ctx.Dest = true
 			}
 			if _, _, err := writeDeepObject(ctx, v); err != nil {
@@ -669,7 +694,11 @@ func writeDeepDict(ctx *model.Context, d types.Dict, objNr, genNr int) error {
 	}
 
 	for k, v := range d {
-		if ctx.WritingPages && (k == "Dest" || k == "D") {
+		destination, err := isPageDestinationEntry(ctx, d, k)
+		if err != nil {
+			return err
+		}
+		if destination {
 			ctx.Dest = true
 		}
 		if _, _, err := writeDeepObject(ctx, v); err != nil {
