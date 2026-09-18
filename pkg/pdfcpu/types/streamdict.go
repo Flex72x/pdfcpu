@@ -503,6 +503,7 @@ func (osd *ObjectStreamDict) AddObject(objNumber int, pdfString string) error {
 
 // Finalize prepares the final content of the objectstream.
 func (osd *ObjectStreamDict) Finalize() {
+	osd.Prolog = append(osd.Prolog, ' ')
 	osd.Content = append(osd.Prolog, osd.Content...)
 	osd.FirstObjOffset = len(osd.Prolog)
 	if log.TraceEnabled() {

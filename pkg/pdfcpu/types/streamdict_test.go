@@ -24,6 +24,22 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/filter"
 )
 
+func TestObjectStreamFinalizeSeparatesHeaderFromFirstObject(t *testing.T) {
+	osd := ObjectStreamDict{
+		Prolog: []byte("1 0"),
+	}
+	osd.Content = []byte("42")
+
+	osd.Finalize()
+
+	if got, want := string(osd.Content), "1 0 42"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if got, want := osd.FirstObjOffset, len("1 0 "); got != want {
+		t.Fatalf("first object offset: got %d, want %d", got, want)
+	}
+}
+
 func TestDecodePreservesSoleJBIG2Stream(t *testing.T) {
 	raw := []byte{0x97, 0x4a, 0x42, 0x32}
 	sd := StreamDict{
