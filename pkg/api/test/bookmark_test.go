@@ -48,19 +48,18 @@ func listBookmarksFile(t *testing.T, fileName string, conf *model.Configuration)
 	}
 	conf.Cmd = model.LISTBOOKMARKS
 
-	ctx, err := api.ReadValidateAndOptimize(f, conf)
+	ctx, err := api.ReadValidateAndOptimize(t.Context(), f, conf, nil)
 	if err != nil {
 		t.Fatalf("%s ReadValidateAndOptimize: %v\n", msg, err)
 	}
 
-	return pdfcpu.BookmarkList(ctx)
+	return pdfcpu.BookmarkList(t.Context(), ctx)
 }
 
 // TestListBookmarks verifies list bookmarks.
 func TestListBookmarks(t *testing.T) {
 	msg := "TestListBookmarks"
-	inDir := filepath.Join("..", "..", "samples", "bookmarks")
-	inFile := filepath.Join(inDir, "bookmarkTree.pdf")
+	inFile := filepath.Join(inDir, "bookmarks", "bookmarkTree.pdf")
 
 	if _, err := listBookmarksFile(t, inFile, nil); err != nil {
 		t.Fatalf("%s list bookmarks: %v\n", msg, err)
@@ -89,10 +88,10 @@ func TestAddDuplicateBookmarks(t *testing.T) {
 	}
 
 	replace := true // Replace existing bookmarks.
-	if err := api.AddBookmarksFile(inFile, outFile, bms, replace, nil); err != nil {
+	if err := api.AddBookmarksFile(t.Context(), inFile, outFile, bms, replace, nil); err != nil {
 		t.Fatalf("%s addBookmarks: %v\n", msg, err)
 	}
-	if err := api.ValidateFile(outFile, nil); err != nil {
+	if err := api.ValidateFile(t.Context(), outFile, nil, nil); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
 }
@@ -119,10 +118,10 @@ func TestAddSimpleBookmarks(t *testing.T) {
 	}
 
 	replace := true // Replace existing bookmarks.
-	if err := api.AddBookmarksFile(inFile, outFile, bms, replace, nil); err != nil {
+	if err := api.AddBookmarksFile(t.Context(), inFile, outFile, bms, replace, nil); err != nil {
 		t.Fatalf("%s addBookmarks: %v\n", msg, err)
 	}
-	if err := api.ValidateFile(outFile, nil); err != nil {
+	if err := api.ValidateFile(t.Context(), outFile, nil, nil); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
 }
@@ -131,7 +130,7 @@ func TestAddSimpleBookmarks(t *testing.T) {
 func TestAddBookmarkTree2Levels(t *testing.T) {
 	msg := "TestAddBookmarkTree2Levels"
 	inFile := filepath.Join(inDir, "CenterOfWhy.pdf")
-	outFile := filepath.Join("..", "..", "samples", "bookmarks", "bookmarkTree2Levels.pdf")
+	outFile := filepath.Join(samplesDir, "bookmarks", "bookmarkTree2Levels.pdf")
 
 	bms := []pdfcpu.Bookmark{
 		{PageFrom: 1, Title: "Page 1: Level 1", Color: &color.Green,
@@ -150,10 +149,10 @@ func TestAddBookmarkTree2Levels(t *testing.T) {
 			}},
 	}
 
-	if err := api.AddBookmarksFile(inFile, outFile, bms, false, nil); err != nil {
+	if err := api.AddBookmarksFile(t.Context(), inFile, outFile, bms, false, nil); err != nil {
 		t.Fatalf("%s addBookmarks: %v\n", msg, err)
 	}
-	if err := api.ValidateFile(outFile, nil); err != nil {
+	if err := api.ValidateFile(t.Context(), outFile, nil, nil); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
 }
@@ -161,14 +160,13 @@ func TestAddBookmarkTree2Levels(t *testing.T) {
 // TestRemoveBookmarks verifies remove bookmarks.
 func TestRemoveBookmarks(t *testing.T) {
 	msg := "TestRemoveBookmarks"
-	inDir := filepath.Join("..", "..", "samples", "bookmarks")
-	inFile := filepath.Join(inDir, "bookmarkTree.pdf")
-	outFile := filepath.Join(inDir, "bookmarkTreeNoBookmarks.pdf")
+	inFile := filepath.Join(inDir, "bookmarks", "bookmarkTree.pdf")
+	outFile := filepath.Join(samplesDir, "bookmarks", "bookmarkTreeNoBookmarks.pdf")
 
-	if err := api.RemoveBookmarksFile(inFile, outFile, nil); err != nil {
+	if err := api.RemoveBookmarksFile(t.Context(), inFile, outFile, nil); err != nil {
 		t.Fatalf("%s removeBookmarks: %v\n", msg, err)
 	}
-	if err := api.ValidateFile(outFile, nil); err != nil {
+	if err := api.ValidateFile(t.Context(), outFile, nil, nil); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
 }
@@ -176,11 +174,10 @@ func TestRemoveBookmarks(t *testing.T) {
 // TestExportBookmarks verifies export bookmarks.
 func TestExportBookmarks(t *testing.T) {
 	msg := "TestExportBookmarks"
-	inDir := filepath.Join("..", "..", "samples", "bookmarks")
-	inFile := filepath.Join(inDir, "bookmarkTree.pdf")
-	outFile := filepath.Join(inDir, "bookmarkTree.json")
+	inFile := filepath.Join(inDir, "bookmarks", "bookmarkTree.pdf")
+	outFile := filepath.Join(samplesDir, "bookmarks", "bookmarkTree.json")
 
-	if err := api.ExportBookmarksFile(inFile, outFile, nil); err != nil {
+	if err := api.ExportBookmarksFile(t.Context(), inFile, outFile, nil); err != nil {
 		t.Fatalf("%s export bookmarks: %v\n", msg, err)
 	}
 }
@@ -188,16 +185,15 @@ func TestExportBookmarks(t *testing.T) {
 // TestImportBookmarks verifies import bookmarks.
 func TestImportBookmarks(t *testing.T) {
 	msg := "TestImportBookmarks"
-	inDir := filepath.Join("..", "..", "samples", "bookmarks")
-	inFile := filepath.Join(inDir, "bookmarkTree.pdf")
-	inFileJSON := filepath.Join(inDir, "bookmarkTree.json")
-	outFile := filepath.Join(inDir, "bookmarkTreeImported.pdf")
+	inFile := filepath.Join(inDir, "bookmarks", "bookmarkTree.pdf")
+	inFileJSON := filepath.Join(samplesDir, "bookmarks", "bookmarkTree.json")
+	outFile := filepath.Join(samplesDir, "bookmarks", "bookmarkTreeImported.pdf")
 
 	replace := true
-	if err := api.ImportBookmarksFile(inFile, inFileJSON, outFile, replace, nil); err != nil {
+	if err := api.ImportBookmarksFile(t.Context(), inFile, inFileJSON, outFile, replace, nil); err != nil {
 		t.Fatalf("%s importBookmarks: %v\n", msg, err)
 	}
-	if err := api.ValidateFile(outFile, nil); err != nil {
+	if err := api.ValidateFile(t.Context(), outFile, nil, nil); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
 }

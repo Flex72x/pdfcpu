@@ -17,10 +17,12 @@ limitations under the License.
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 
+	"github.com/pdfcpu/pdfcpu/internal/contextutil"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/log"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
@@ -37,6 +39,9 @@ func validateExtractionCommand(cmd *Command, operation string) error {
 }
 
 func reportUnsupportedResourceSkips(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
 	var unsupportedErr *api.UnsupportedResourceError
 	if !errors.As(err, &unsupportedErr) {
 		return err
@@ -47,37 +52,50 @@ func reportUnsupportedResourceSkips(err error) error {
 	return nil
 }
 
-func writeExtractedPageToStdout(ctx *model.Context, pageNr int, w io.Writer) error {
-	r, err := api.ExtractPage(ctx, pageNr)
+func reportExtractionProgress(cmd *Command, resource string) {
+	inFile := *cmd.InFile
+	if inFile == "-" {
+		inFile = "stdin"
+	}
+	reportCommandProgress(cmd, "extracting %s from %s into %s/ ...\n", resource, inFile, *cmd.OutDir)
+}
+
+func writeExtractedPageToStdout(c context.Context, ctx *model.Context, pageNr int, w io.Writer) error {
+	if err := contextutil.Check(c); err != nil {
+		return err
+	}
+	r, err := api.ExtractPage(c, ctx, pageNr)
 	if err != nil {
 		return fmt.Errorf("%s: extraction: %w", extractPagesOperation, err)
 	}
 
-	if _, err := io.Copy(w, r); err != nil {
+	if _, err := io.Copy(w, contextReader{ctx: c, r: r}); err != nil {
 		return fmt.Errorf("%s: stdout copy: %w", extractPagesOperation, err)
 	}
-	return nil
+	return c.Err()
 }
 
-func extractSelectedPageToStdout(rs io.ReadSeeker, w io.Writer, cmd *Command) error {
-	conf := cmd.Conf
-	if conf == nil {
-		conf = model.NewDefaultConfiguration()
+func extractSelectedPageToStdout(c context.Context, rs io.ReadSeeker, w io.Writer, cmd *Command) error {
+	if err := contextutil.Check(c); err != nil {
+		return err
 	}
-	conf.Cmd = model.EXTRACTPAGES
+	conf := configurationForMode(cmd.Conf, model.EXTRACTPAGES)
 
-	ctx, err := api.ReadValidateAndOptimize(rs, conf)
+	ctx, err := api.ReadValidateAndOptimize(c, rs, conf, nil)
 	if err != nil {
 		return fmt.Errorf("%s: read: %w", extractPagesOperation, err)
 	}
 
-	pages, err := api.PagesForPageSelection(ctx.PageCount, cmd.PageSelection, true, true)
+	pages, err := api.PagesForSelection(ctx.PageCount, cmd.PageSelection, true)
 	if err != nil {
 		return fmt.Errorf("%s: selection: %w", extractPagesOperation, err)
 	}
 
 	pageNr, count := 0, 0
 	for i, selected := range pages {
+		if err := c.Err(); err != nil {
+			return err
+		}
 		if selected {
 			pageNr = i
 			count++
@@ -87,87 +105,118 @@ func extractSelectedPageToStdout(rs io.ReadSeeker, w io.Writer, cmd *Command) er
 		return fmt.Errorf("%s: selection: stdout requires exactly one selected page", extractPagesOperation)
 	}
 
-	return writeExtractedPageToStdout(ctx, pageNr, w)
+	return writeExtractedPageToStdout(c, ctx, pageNr, w)
 }
 
-func extractPageToStdout(cmd *Command) error {
-	rs, w, finalize, err := streamInOutForOperation(*cmd.InFile, "-", extractPagesOperation)
+func extractPageToStdout(c context.Context, cmd *Command) error {
+	rs, w, finalize, err := streamInOutForOperation(c, cmd.Conf, *cmd.InFile, "-", extractPagesOperation)
 	if err != nil {
 		return err
 	}
-	return finalize(extractSelectedPageToStdout(rs, w, cmd))
+	return finalize(extractSelectedPageToStdout(c, rs, w, cmd))
 }
 
-// ExtractImages dumps embedded image resources from inFile into outDir for selected pages.
-func ExtractImages(cmd *Command) ([]string, error) {
+func extractImages(c context.Context, cmd *Command) ([]string, error) {
+	if err := contextutil.Check(c); err != nil {
+		return nil, err
+	}
 	if err := validateExtractionCommand(cmd, "extract images"); err != nil {
 		return nil, err
 	}
+	reportExtractionProgress(cmd, "images")
 	if *cmd.InFile == "-" {
-		return withStdinReadSeeker("extract images", func(rs io.ReadSeeker) ([]string, error) {
-			err := api.ExtractImages(rs, cmd.PageSelection, api.WriteImageToDisk(*cmd.OutDir, "stdin"), cmd.Conf)
+		return withStdinReadSeeker(c, cmd.Conf, "extract images", func(rs io.ReadSeeker) ([]string, error) {
+			err := api.ExtractImages(
+				c, rs, cmd.PageSelection, api.WriteImageToDisk(c, *cmd.OutDir, "stdin"), cmd.Conf,
+			)
 			return nil, reportUnsupportedResourceSkips(err)
 		})
 	}
-	return nil, reportUnsupportedResourceSkips(api.ExtractImagesFile(*cmd.InFile, *cmd.OutDir, cmd.PageSelection, cmd.Conf))
+	return nil, reportUnsupportedResourceSkips(
+		api.ExtractImagesFile(c, *cmd.InFile, *cmd.OutDir, cmd.PageSelection, cmd.Conf),
+	)
 }
 
-// ExtractFonts dumps embedded fontfiles from inFile into outDir for selected pages.
-func ExtractFonts(cmd *Command) ([]string, error) {
+func extractFonts(c context.Context, cmd *Command) ([]string, error) {
+	if err := contextutil.Check(c); err != nil {
+		return nil, err
+	}
 	if err := validateExtractionCommand(cmd, "extract fonts"); err != nil {
 		return nil, err
 	}
+	reportExtractionProgress(cmd, "fonts")
 	if *cmd.InFile == "-" {
-		return withStdinReadSeeker("extract fonts", func(rs io.ReadSeeker) ([]string, error) {
-			err := api.ExtractFonts(rs, cmd.PageSelection, api.WriteFontToDisk(*cmd.OutDir, "stdin"), cmd.Conf)
+		return withStdinReadSeeker(c, cmd.Conf, "extract fonts", func(rs io.ReadSeeker) ([]string, error) {
+			err := api.ExtractFonts(
+				c, rs, cmd.PageSelection, api.WriteFontToDisk(c, *cmd.OutDir, "stdin"), cmd.Conf,
+			)
 			return nil, reportUnsupportedResourceSkips(err)
 		})
 	}
-	return nil, reportUnsupportedResourceSkips(api.ExtractFontsFile(*cmd.InFile, *cmd.OutDir, cmd.PageSelection, cmd.Conf))
+	return nil, reportUnsupportedResourceSkips(
+		api.ExtractFontsFile(c, *cmd.InFile, *cmd.OutDir, cmd.PageSelection, cmd.Conf),
+	)
 }
 
-// ExtractPages generates single page PDF files from inFile in outDir for selected pages.
-func ExtractPages(cmd *Command) ([]string, error) {
+func extractPages(c context.Context, cmd *Command) ([]string, error) {
+	if err := contextutil.Check(c); err != nil {
+		return nil, err
+	}
 	if err := validateExtractionCommand(cmd, extractPagesOperation); err != nil {
 		return nil, err
 	}
+	reportExtractionProgress(cmd, "pages")
 	if *cmd.OutDir == "-" {
-		return nil, extractPageToStdout(cmd)
+		return nil, extractPageToStdout(c, cmd)
 	}
 
 	if *cmd.InFile == "-" {
-		return withStdinReadSeeker("extract pages", func(rs io.ReadSeeker) ([]string, error) {
-			return nil, api.ExtractPages(rs, cmd.PageSelection, api.WritePageToDisk(*cmd.OutDir, "stdin"), cmd.Conf)
+		return withStdinReadSeeker(c, cmd.Conf, "extract pages", func(rs io.ReadSeeker) ([]string, error) {
+			return nil, api.ExtractPages(
+				c, rs, cmd.PageSelection, api.WritePageToDisk(c, *cmd.OutDir, "stdin"), cmd.Conf,
+			)
 		})
 	}
 
-	return nil, api.ExtractPagesFile(*cmd.InFile, *cmd.OutDir, cmd.PageSelection, cmd.Conf)
+	return nil, api.ExtractPagesFile(c, *cmd.InFile, *cmd.OutDir, cmd.PageSelection, cmd.Conf)
 }
 
-// ExtractContent dumps "PDF source" files from inFile into outDir for selected pages.
-func ExtractContent(cmd *Command) ([]string, error) {
+func extractContent(c context.Context, cmd *Command) ([]string, error) {
+	if err := contextutil.Check(c); err != nil {
+		return nil, err
+	}
 	if err := validateExtractionCommand(cmd, "extract content"); err != nil {
 		return nil, err
 	}
+	reportExtractionProgress(cmd, "content")
 	if *cmd.InFile == "-" {
-		return withStdinReadSeeker("extract content", func(rs io.ReadSeeker) ([]string, error) {
-			return nil, api.ExtractContent(rs, cmd.PageSelection, api.WriteContentToDisk(*cmd.OutDir, "stdin"), cmd.Conf)
+		return withStdinReadSeeker(c, cmd.Conf, "extract content", func(rs io.ReadSeeker) ([]string, error) {
+			return nil, api.ExtractContent(
+				c, rs, cmd.PageSelection, api.WriteContentToDisk(c, *cmd.OutDir, "stdin"), cmd.Conf,
+			)
 		})
 	}
-	return nil, api.ExtractContentFile(*cmd.InFile, *cmd.OutDir, cmd.PageSelection, cmd.Conf)
+	return nil, api.ExtractContentFile(c, *cmd.InFile, *cmd.OutDir, cmd.PageSelection, cmd.Conf)
 }
 
-// ExtractMetadata dumps all metadata dict entries for inFile into outDir.
-func ExtractMetadata(cmd *Command) ([]string, error) {
+func extractMetadata(c context.Context, cmd *Command) ([]string, error) {
+	if err := contextutil.Check(c); err != nil {
+		return nil, err
+	}
 	if err := validateExtractionCommand(cmd, "extract metadata"); err != nil {
 		return nil, err
 	}
+	reportExtractionProgress(cmd, "metadata")
 	if *cmd.InFile == "-" {
-		return withStdinReadSeeker("extract metadata", func(rs io.ReadSeeker) ([]string, error) {
-			err := api.ExtractMetadata(rs, api.WriteMetadataToDisk(*cmd.OutDir, "stdin"), cmd.Conf)
+		return withStdinReadSeeker(c, cmd.Conf, "extract metadata", func(rs io.ReadSeeker) ([]string, error) {
+			err := api.ExtractMetadata(
+				c, rs, api.WriteMetadataToDisk(c, *cmd.OutDir, "stdin"), cmd.Conf,
+			)
 			return nil, reportUnsupportedResourceSkips(err)
 		})
 	}
 
-	return nil, reportUnsupportedResourceSkips(api.ExtractMetadataFile(*cmd.InFile, *cmd.OutDir, cmd.Conf))
+	return nil, reportUnsupportedResourceSkips(
+		api.ExtractMetadataFile(c, *cmd.InFile, *cmd.OutDir, cmd.Conf),
+	)
 }

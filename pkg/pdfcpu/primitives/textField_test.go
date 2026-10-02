@@ -18,9 +18,12 @@ package primitives
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 
+	corefont "github.com/pdfcpu/pdfcpu/pkg/font"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/color"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
@@ -55,7 +58,7 @@ func TestTextFieldCombEscapesEachCell(t *testing.T) {
 		fontID: "Helv",
 	}
 
-	bb, err := tf.renderN(ctx.XRefTable)
+	bb, err := tf.renderN(t.Context(), ctx.XRefTable)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,5 +72,82 @@ func TestTextFieldCombEscapesEachCell(t *testing.T) {
 	}
 	if got := strings.Count(content, " Tj "); got != 3 {
 		t.Fatalf("comb appearance Tj count = %d, want 3: %s", got, content)
+	}
+}
+
+func TestTextFieldAppearanceAppliesFontEncodingDifferences(t *testing.T) {
+	ctx, err := model.NewContext(strings.NewReader(""), model.NewDefaultConfiguration())
+	if err != nil {
+		t.Fatal(err)
+	}
+	indRef := types.NewIndirectRef(7, 0)
+	ctx.XRefTable.Table[7] = model.NewXRefTableEntryGen0(types.Dict{
+		"Subtype":  types.Name("Type1"),
+		"BaseFont": types.Name("Courier"),
+		"Encoding": types.Dict{
+			"BaseEncoding": types.Name("WinAnsiEncoding"),
+			"Differences":  types.Array{types.Integer(65), types.Name("B"), types.Name("A")},
+		},
+	})
+
+	fontName, _, _, err := FormFontDetails(t.Context(), ctx.XRefTable, *indRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &FormFont{Name: fontName, Size: 10, col: &color.Black, FillFont: true}
+	if err := applyFormFontEncoding(ctx.XRefTable, f, indRef); err != nil {
+		t.Fatal(err)
+	}
+	tf := TextField{
+		Value:       "AB COMPANY",
+		BoundingBox: types.RectForDim(120, 20),
+		Font:        f,
+		fontID:      "Courier",
+	}
+
+	bb, err := tf.renderN(t.Context(), ctx.XRefTable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content := string(bb); !strings.Contains(content, "(BA COMPBNY) Tj") {
+		t.Fatalf("appearance does not apply font encoding Differences: %s", content)
+	}
+}
+
+func TestTextFieldMetricsUseStatelessRepository(t *testing.T) {
+	useMissingGlobalFontDirectory(t)
+	ctx, err := model.NewContext(strings.NewReader(""), model.NewStatelessConfiguration())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tf := TextField{
+		Value:       "text",
+		BoundingBox: types.RectForDim(60, 20),
+		Font: &FormFont{
+			Name: "Demo",
+			Size: 10,
+			col:  &color.Black,
+		},
+		fontID: "F0",
+	}
+
+	if _, err := tf.renderN(t.Context(), ctx.XRefTable); !errors.Is(err, corefont.ErrUnknownFont) {
+		t.Fatalf("expected %v, got %v", corefont.ErrUnknownFont, err)
+	}
+	if _, err := textFieldLines(t.Context(), ctx.XRefTable, "text", "Demo", 10, true, 60); !errors.Is(err, corefont.ErrUnknownFont) {
+		t.Fatalf("expected %v from multiline wrapping, got %v", corefont.ErrUnknownFont, err)
+	}
+	if err := tf.renderLines(
+		t.Context(),
+		ctx.XRefTable,
+		ctx.XRefTable.FontRepository(),
+		0,
+		10,
+		60,
+		10,
+		[]string{"text"},
+		io.Discard,
+	); !errors.Is(err, corefont.ErrUnknownFont) {
+		t.Fatalf("expected %v from text bounding box, got %v", corefont.ErrUnknownFont, err)
 	}
 }

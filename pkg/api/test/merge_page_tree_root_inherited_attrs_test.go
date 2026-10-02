@@ -51,11 +51,11 @@ func removePageTreeAttr(ctx *model.Context, indRef types.IndirectRef, key string
 // TestMergePageTreeInheritedAttrsIsolated ensures destination page attributes do not leak into source pages.
 func TestMergePageTreeInheritedAttrsIsolated(t *testing.T) {
 	inFile := filepath.Join(inDir, "Acroforms2.pdf")
-	ctxDest, err := api.ReadContextFile(inFile)
+	ctxDest, err := api.ReadContextFile(t.Context(), inFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctxSrc, err := api.ReadContextFile(inFile)
+	ctxSrc, err := api.ReadContextFile(t.Context(), inFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,11 +82,11 @@ func TestMergePageTreeInheritedAttrsIsolated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := pdfcpu.MergeXRefTables("", ctxSrc, ctxDest, false, false); err != nil {
+	if err := pdfcpu.MergeXRefTables(t.Context(), "", ctxSrc, ctxDest, false, false); err != nil {
 		t.Fatal(err)
 	}
 
-	_, _, destAttrs, err := ctxDest.PageDict(1, false)
+	_, _, destAttrs, err := ctxDest.PageDict(t.Context(), 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestMergePageTreeInheritedAttrsIsolated(t *testing.T) {
 		t.Fatalf("destination page rotation: got %d, want 90", destAttrs.Rotate)
 	}
 
-	_, _, srcAttrs, err := ctxDest.PageDict(destPageCount+1, false)
+	_, _, srcAttrs, err := ctxDest.PageDict(t.Context(), destPageCount+1, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -27,7 +27,7 @@ func testUpdateImages(t *testing.T, msg string, inFile, imgFile, outFile string,
 	t.Helper()
 
 	cmd := cli.UpdateImagesCommand(inFile, imgFile, outFile, objNrOrPageNr, id, conf)
-	if _, err := cli.Dispatch(cmd); err != nil {
+	if _, err := cli.Dispatch(t.Context(), cmd); err != nil {
 		t.Fatalf("%s %s: %v\n", msg, inFile, err)
 	}
 
@@ -38,7 +38,7 @@ func testUpdateImages(t *testing.T, msg string, inFile, imgFile, outFile string,
 
 // TestUpdateImages verifies update images.
 func TestUpdateImages(t *testing.T) {
-	inDir := filepath.Join(samplesDir, "images")
+	fixtureDir := filepath.Join(inDir, "image-fixtures")
 
 	for _, tt := range []struct {
 		msg           string
@@ -116,10 +116,16 @@ func TestUpdateImages(t *testing.T) {
 			"imageUpdatedByObjNrPNGGray.pdf",
 			8,
 			""},
+		{"TestUpdateByObjNrTIFFGray",
+			"test.pdf",
+			"any_gray.png",
+			"imageUpdatedByObjNrTIFFGray.pdf",
+			8,
+			""},
 	} {
 		testUpdateImages(t, tt.msg,
-			filepath.Join(inDir, tt.inFile),
-			filepath.Join(inDir, tt.imgFile),
+			filepath.Join(fixtureDir, tt.inFile),
+			filepath.Join(fixtureDir, tt.imgFile),
 			filepath.Join(outDir, tt.outFile),
 			tt.objNrOrPageNr,
 			tt.id)

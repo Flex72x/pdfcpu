@@ -22,11 +22,11 @@ func TestWritePreservesMeasureDistanceFormats(t *testing.T) {
 						conf.ValidationMode = model.ValidationRelaxed
 						conf.WriteObjectStream = objectStreams
 						source := measureWriteFixture(directMeasure, indirectArray, optionalTypes, "GoTo")
-						before, err := api.ReadContext(bytes.NewReader(source), conf)
+						before, err := api.ReadContext(t.Context(), bytes.NewReader(source), conf)
 						if err != nil {
 							t.Fatal(err)
 						}
-						if err = api.ValidateContext(before); err != nil {
+						if err = api.ValidateContext(t.Context(), before); err != nil {
 							t.Fatal(err)
 						}
 						measure := pageMeasure(t, before)
@@ -44,17 +44,17 @@ func TestWritePreservesMeasureDistanceFormats(t *testing.T) {
 							want[i] = d.Clone().(types.Dict)
 						}
 						var out bytes.Buffer
-						if err = api.Write(before, &out, conf); err != nil {
+						if err = api.Write(t.Context(), before, &out, conf); err != nil {
 							t.Fatal(err)
 						}
 						if !reflect.DeepEqual(original, measure) {
 							t.Fatal("writer changed the source Measure dictionary")
 						}
-						after, err := api.ReadContext(bytes.NewReader(out.Bytes()), conf)
+						after, err := api.ReadContext(t.Context(), bytes.NewReader(out.Bytes()), conf)
 						if err != nil {
 							t.Fatal(err)
 						}
-						if err = api.ValidateContext(after); err != nil {
+						if err = api.ValidateContext(t.Context(), after); err != nil {
 							t.Fatalf("readback validation: %v", err)
 						}
 						restored := pageMeasure(t, after)
@@ -93,11 +93,11 @@ func TestWritePreservesGoToActionDestinations(t *testing.T) {
 			conf := model.NewDefaultConfiguration()
 			conf.ValidationMode = model.ValidationRelaxed
 			source := measureWriteFixture(false, true, true, kind)
-			doc, err := api.ReadContext(bytes.NewReader(source), conf)
+			doc, err := api.ReadContext(t.Context(), bytes.NewReader(source), conf)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = api.ValidateContext(doc); err != nil {
+			if err = api.ValidateContext(t.Context(), doc); err != nil {
 				t.Fatal(err)
 			}
 			ref := *types.NewIndirectRef(16, 0)
@@ -107,14 +107,14 @@ func TestWritePreservesGoToActionDestinations(t *testing.T) {
 			}
 			want := action.Clone()
 			var out bytes.Buffer
-			if err = api.Write(doc, &out, conf); err != nil {
+			if err = api.Write(t.Context(), doc, &out, conf); err != nil {
 				t.Fatal(err)
 			}
-			after, err := api.ReadContext(bytes.NewReader(out.Bytes()), conf)
+			after, err := api.ReadContext(t.Context(), bytes.NewReader(out.Bytes()), conf)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = api.ValidateContext(after); err != nil {
+			if err = api.ValidateContext(t.Context(), after); err != nil {
 				t.Fatal(err)
 			}
 			got, err := after.DereferenceDict(ref)
@@ -137,7 +137,7 @@ func TestWritePreservesGoToActionDestinations(t *testing.T) {
 
 func pageMeasure(t *testing.T, doc *model.Context) types.Dict {
 	t.Helper()
-	page, _, _, err := doc.PageDict(1, false)
+	page, _, _, err := doc.PageDict(t.Context(), 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}

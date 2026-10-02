@@ -17,6 +17,7 @@ limitations under the License.
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -32,7 +33,7 @@ import (
 func noOpFontAPIOperations() fontAPIOperations {
 	return fontAPIOperations{
 		userFontDir:     "/fonts",
-		reloadUserFonts: func() error { return nil },
+		reloadUserFonts: func(context.Context) error { return nil },
 		installTrueTypeFont: func(_ string, fileName string) (font.InstallResult, error) {
 			return font.InstallResult{PostScriptName: strings.TrimSuffix(fileName, filepath.Ext(fileName))}, nil
 		},
@@ -44,15 +45,14 @@ func noOpFontAPIOperations() fontAPIOperations {
 		commitStagedFonts: func(string, string) (fontInstallCommit, error) {
 			return fontInstallCommit{rollback: func() error { return nil }, finalize: func() error { return nil }}, nil
 		},
-		removeAll:            func(string) error { return nil },
-		rename:               func(string, string) error { return nil },
-		reportCleanupWarning: func(error) {},
+		removeAll: func(string) error { return nil },
+		rename:    func(string, string) error { return nil },
 	}
 }
 
 func TestListFontsPreservesLoadError(t *testing.T) {
 	wantErr := errors.New("load user fonts")
-	_, err := listFonts(func() ([]string, error) { return nil, wantErr })
+	_, err := listFontsUsing(t.Context(), func(context.Context) ([]string, error) { return nil, wantErr })
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
@@ -92,7 +92,7 @@ func TestInstallFontsRejectsInvalidInputsBeforeInstalling(t *testing.T) {
 				installCalls++
 				return font.InstallResult{}, nil
 			}
-			err := installFonts(tt.fileNames, ops)
+			err := installFontsUsing(t.Context(), tt.fileNames, ops, nil)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("expected %v, got %v", tt.wantErr, err)
 			}
@@ -110,7 +110,7 @@ func TestInstallFontsEmptyInputReloadsExistingFonts(t *testing.T) {
 	ops := noOpFontAPIOperations()
 	reloadCalls := 0
 	stagingCalls := 0
-	ops.reloadUserFonts = func() error {
+	ops.reloadUserFonts = func(context.Context) error {
 		reloadCalls++
 		return nil
 	}
@@ -118,7 +118,7 @@ func TestInstallFontsEmptyInputReloadsExistingFonts(t *testing.T) {
 		stagingCalls++
 		return "", nil
 	}
-	if err := installFonts(nil, ops); err != nil {
+	if err := installFontsUsing(t.Context(), nil, ops, nil); err != nil {
 		t.Fatal(err)
 	}
 	if reloadCalls != 1 {
@@ -132,8 +132,8 @@ func TestInstallFontsEmptyInputReloadsExistingFonts(t *testing.T) {
 func TestInstallFontsEmptyInputPreservesReloadError(t *testing.T) {
 	wantErr := errors.New("reload failed")
 	ops := noOpFontAPIOperations()
-	ops.reloadUserFonts = func() error { return wantErr }
-	err := installFonts(nil, ops)
+	ops.reloadUserFonts = func(context.Context) error { return wantErr }
+	err := installFontsUsing(t.Context(), nil, ops, nil)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
@@ -145,7 +145,7 @@ func TestInstallFontsEmptyInputPreservesReloadError(t *testing.T) {
 func TestInstallFontsRequiresUserFontDirectory(t *testing.T) {
 	ops := noOpFontAPIOperations()
 	ops.userFontDir = ""
-	err := installFonts([]string{"font.ttf"}, ops)
+	err := installFontsUsing(t.Context(), []string{"font.ttf"}, ops, nil)
 	if !errors.Is(err, ErrMissingConfiguration) {
 		t.Fatalf("expected %v, got %v", ErrMissingConfiguration, err)
 	}
@@ -167,7 +167,7 @@ func TestInstallFontsDispatchesSupportedFiles(t *testing.T) {
 	}
 
 	fileNames := []string{"one.TTF", "two.ttc"}
-	if err := installFonts(fileNames, ops); err != nil {
+	if err := installFontsUsing(t.Context(), fileNames, ops, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := strings.Join(installed, ","), "ttf:one.TTF,ttc:two.ttc"; got != want {
@@ -209,7 +209,7 @@ func TestInstallFontsPreservesOperationErrors(t *testing.T) {
 			name:     "reload installed fonts",
 			fileName: "font.ttf",
 			configure: func(ops *fontAPIOperations, wantErr error) {
-				ops.reloadUserFonts = func() error { return wantErr }
+				ops.reloadUserFonts = func(context.Context) error { return wantErr }
 			},
 			wantPhase: "install fonts: reload user fonts",
 		},
@@ -220,7 +220,7 @@ func TestInstallFontsPreservesOperationErrors(t *testing.T) {
 			wantErr := errors.New("underlying failure")
 			ops := noOpFontAPIOperations()
 			tt.configure(&ops, wantErr)
-			err := installFonts([]string{tt.fileName}, ops)
+			err := installFontsUsing(t.Context(), []string{tt.fileName}, ops, nil)
 			if !errors.Is(err, wantErr) {
 				t.Fatalf("expected %v, got %v", wantErr, err)
 			}
@@ -258,7 +258,7 @@ func TestInstallFontsStagesEntireBatchBeforeCommit(t *testing.T) {
 	wantErr := errors.New("second font malformed")
 	ops := transactionalFontAPIOperations(t)
 	reloadCalls := 0
-	ops.reloadUserFonts = func() error {
+	ops.reloadUserFonts = func(context.Context) error {
 		reloadCalls++
 		return nil
 	}
@@ -270,7 +270,7 @@ func TestInstallFontsStagesEntireBatchBeforeCommit(t *testing.T) {
 		return font.InstallResult{PostScriptName: "One"}, err
 	}
 
-	err := installFonts([]string{"one.ttf", "two.ttf"}, ops)
+	err := installFontsUsing(t.Context(), []string{"one.ttf", "two.ttf"}, ops, nil)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
@@ -282,6 +282,115 @@ func TestInstallFontsStagesEntireBatchBeforeCommit(t *testing.T) {
 	}
 	if reloadCalls != 0 {
 		t.Fatalf("expected no metrics reload before commit, got %d", reloadCalls)
+	}
+}
+
+func TestInstallFontsCancellationBetweenInputsCleansStaging(t *testing.T) {
+	ops := transactionalFontAPIOperations(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	installCalls := 0
+	commitCalls := 0
+	ops.installTrueTypeFont = func(inputDir, fileName string) (font.InstallResult, error) {
+		installCalls++
+		name := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+		if err := writeStagedFont(inputDir, name, "new"); err != nil {
+			return font.InstallResult{}, err
+		}
+		cancel()
+		return font.InstallResult{PostScriptName: name}, nil
+	}
+	ops.commitStagedFonts = func(string, string) (fontInstallCommit, error) {
+		commitCalls++
+		return fontInstallCommit{}, nil
+	}
+
+	err := installFontsUsing(ctx, []string{"one.ttf", "two.ttf"}, ops, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	if installCalls != 1 {
+		t.Fatalf("font installs: got %d, want 1", installCalls)
+	}
+	if commitCalls != 0 {
+		t.Fatalf("commit calls: got %d, want 0", commitCalls)
+	}
+	matches, globErr := filepath.Glob(filepath.Join(ops.userFontDir, ".pdfcpu-font-install-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("staging directories remain: %v", matches)
+	}
+	if _, statErr := os.Stat(filepath.Join(ops.userFontDir, "one.gob")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("cancelled batch was published: %v", statErr)
+	}
+}
+
+func TestInstallFontsCancellationAfterCommitRollsBack(t *testing.T) {
+	ops := noOpFontAPIOperations()
+	ctx, cancel := context.WithCancel(t.Context())
+	rollbackCalls := 0
+	reloadCalls := 0
+	ops.commitStagedFonts = func(string, string) (fontInstallCommit, error) {
+		cancel()
+		return fontInstallCommit{
+			rollback: func() error {
+				rollbackCalls++
+				return nil
+			},
+			finalize: func() error { return nil },
+		}, nil
+	}
+	ops.reloadUserFonts = func(context.Context) error {
+		reloadCalls++
+		return nil
+	}
+
+	err := installFontsUsing(ctx, []string{"one.ttf"}, ops, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	if rollbackCalls != 1 {
+		t.Fatalf("rollback calls: got %d, want 1", rollbackCalls)
+	}
+	if reloadCalls != 0 {
+		t.Fatalf("reload calls: got %d, want 0", reloadCalls)
+	}
+}
+
+func TestInstallFontsCancellationDuringReloadRollsBack(t *testing.T) {
+	ops := noOpFontAPIOperations()
+	c, cancel := context.WithCancel(t.Context())
+	rollbackCalls := 0
+	ops.commitStagedFonts = func(string, string) (fontInstallCommit, error) {
+		return fontInstallCommit{
+			rollback: func() error {
+				rollbackCalls++
+				return nil
+			},
+			finalize: func() error { return nil },
+		}, nil
+	}
+	ops.reloadUserFonts = func(context.Context) error {
+		cancel()
+		return nil
+	}
+
+	err := installFontsUsing(c, []string{"one.ttf"}, ops, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	if rollbackCalls != 1 {
+		t.Fatalf("rollback calls: got %d, want 1", rollbackCalls)
+	}
+}
+
+func TestInstallFontsContextAPIsRejectNilContext(t *testing.T) {
+	if err := InstallFonts(nil, nil); !errors.Is(err, ErrMissingContext) {
+		t.Fatalf("got %v, want ErrMissingContext", err)
+	}
+	if _, err := InstallFontsWithResult(nil, nil); !errors.Is(err, ErrMissingContext) {
+		t.Fatalf("got %v, want ErrMissingContext", err)
 	}
 }
 
@@ -301,7 +410,7 @@ func TestInstallFontsDoesNotReplaceExistingFontUntilBatchIsValid(t *testing.T) {
 		return font.InstallResult{PostScriptName: "Same"}, err
 	}
 
-	err := installFonts([]string{"one.ttf", "two.ttf"}, ops)
+	err := installFontsUsing(t.Context(), []string{"one.ttf", "two.ttf"}, ops, nil)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
@@ -325,9 +434,9 @@ func TestInstallFontsRollsBackCommittedFilesWhenReloadFails(t *testing.T) {
 		return font.InstallResult{PostScriptName: "Same"}, err
 	}
 	wantErr := errors.New("reload failed")
-	ops.reloadUserFonts = func() error { return wantErr }
+	ops.reloadUserFonts = func(context.Context) error { return wantErr }
 
-	err := installFonts([]string{"one.ttf"}, ops)
+	err := installFontsUsing(t.Context(), []string{"one.ttf"}, ops, nil)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
@@ -347,7 +456,7 @@ func TestInstallFontsCommitsBatchBeforeReload(t *testing.T) {
 		err := writeStagedFont(stagingDir, name, fileName)
 		return font.InstallResult{PostScriptName: name}, err
 	}
-	ops.reloadUserFonts = func() error {
+	ops.reloadUserFonts = func(context.Context) error {
 		for _, name := range []string{"one", "two"} {
 			if _, err := os.Stat(filepath.Join(ops.userFontDir, name+".gob")); err != nil {
 				return fmt.Errorf("font %s unavailable during reload: %w", name, err)
@@ -356,7 +465,7 @@ func TestInstallFontsCommitsBatchBeforeReload(t *testing.T) {
 		return nil
 	}
 
-	if err := installFonts([]string{"one.ttf", "two.ttf"}, ops); err != nil {
+	if err := installFontsUsing(t.Context(), []string{"one.ttf", "two.ttf"}, ops, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -367,7 +476,7 @@ func TestInstallFontsRejectsDuplicateStagedPostScriptNames(t *testing.T) {
 		err := writeStagedFont(inputDir, "Same", fileName)
 		return font.InstallResult{PostScriptName: "Same"}, err
 	}
-	err := installFonts([]string{"one.ttf", "two.ttf"}, ops)
+	err := installFontsUsing(t.Context(), []string{"one.ttf", "two.ttf"}, ops, nil)
 	if err == nil {
 		t.Fatal("expected duplicate PostScript name")
 	}
@@ -395,7 +504,7 @@ func TestInstallFontsReportsDuplicateCollectionMembers(t *testing.T) {
 			{PostScriptName: "Same", Member: 2},
 		}, nil
 	}
-	err := installFonts([]string{"fonts.ttc"}, ops)
+	err := installFontsUsing(t.Context(), []string{"fonts.ttc"}, ops, nil)
 	if err == nil {
 		t.Fatal("expected duplicate collection member")
 	}
@@ -413,14 +522,14 @@ func TestInstallFontsJoinsReloadAndRollbackFailures(t *testing.T) {
 	reloadErr := errors.New("reload failed")
 	rollbackErr := errors.New("restore failed")
 	ops := noOpFontAPIOperations()
-	ops.reloadUserFonts = func() error { return reloadErr }
+	ops.reloadUserFonts = func(context.Context) error { return reloadErr }
 	ops.commitStagedFonts = func(string, string) (fontInstallCommit, error) {
 		return fontInstallCommit{
 			rollback: func() error { return rollbackErr },
 			finalize: func() error { return nil },
 		}, nil
 	}
-	err := installFonts([]string{"one.ttf"}, ops)
+	err := installFontsUsing(t.Context(), []string{"one.ttf"}, ops, nil)
 	if !errors.Is(err, reloadErr) || !errors.Is(err, rollbackErr) {
 		t.Fatalf("expected joined reload and rollback failures, got %v", err)
 	}
@@ -431,9 +540,8 @@ func TestInstallFontsJoinsReloadAndRollbackFailures(t *testing.T) {
 	}
 }
 
-func TestInstallFontsTreatsFinalizeFailureAsCleanupWarning(t *testing.T) {
+func TestInstallFontsResultIncludesFinalizeWarning(t *testing.T) {
 	finalizeErr := errors.New("remove backup failed")
-	var warning error
 	ops := noOpFontAPIOperations()
 	ops.commitStagedFonts = func(string, string) (fontInstallCommit, error) {
 		return fontInstallCommit{
@@ -441,10 +549,14 @@ func TestInstallFontsTreatsFinalizeFailureAsCleanupWarning(t *testing.T) {
 			finalize: func() error { return finalizeErr },
 		}, nil
 	}
-	ops.reportCleanupWarning = func(err error) { warning = err }
-	if err := installFonts([]string{"one.ttf"}, ops); err != nil {
+	result := FontInstallResult{}
+	if err := installFontsUsing(t.Context(), []string{"one.ttf"}, ops, &result); err != nil {
 		t.Fatalf("installation succeeded and cleanup failure must be a warning, got %v", err)
 	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("expected one cleanup warning, got %d", len(result.Warnings))
+	}
+	warning := result.Warnings[0]
 	if !errors.Is(warning, finalizeErr) {
 		t.Fatalf("expected cleanup warning %v, got %v", finalizeErr, warning)
 	}
@@ -571,26 +683,26 @@ func TestCommitStagedFontsFilesystemFailureSeams(t *testing.T) {
 	})
 }
 
-func noOpFontDemoOperations() fontDemoOperations {
-	return fontDemoOperations{
-		loadUserFonts: func() error { return nil },
-		userFont: func(string) (font.TTFLight, bool, error) {
+func noOpFontDemoOperations() fontCheatSheetOperations {
+	return fontCheatSheetOperations{
+		loadUserFonts: func(context.Context) error { return nil },
+		userFont: func(context.Context, string) (font.TTFLight, bool, error) {
 			return font.TTFLight{Planes: map[int]bool{2: true}}, true, nil
 		},
-		userFontNames: func() ([]string, error) { return nil, nil },
+		userFontNames: func(context.Context) ([]string, error) { return nil, nil },
 		createXRef: func() (*model.XRefTable, error) {
 			return nil, nil
 		},
-		createPage: func(*model.XRefTable, int, int, int, string) (model.Page, error) {
+		createPage: func(context.Context, *model.XRefTable, int, int, int, string) (model.Page, error) {
 			return model.Page{}, nil
 		},
 		catalog: func(*model.XRefTable) (types.Dict, error) {
 			return types.Dict{}, nil
 		},
-		addPageTree: func(*model.XRefTable, types.Dict, model.Page) error {
+		addPageTree: func(context.Context, *model.XRefTable, types.Dict, model.Page) error {
 			return nil
 		},
-		createPDFFile: func(*model.XRefTable, string, *model.Configuration) error {
+		createPDFFile: func(context.Context, *model.XRefTable, string, *model.Configuration) error {
 			return nil
 		},
 		files: cheatSheetFileOperations{
@@ -630,25 +742,36 @@ func TestUnicodePlaneSuffixesAreValidAndUnique(t *testing.T) {
 func TestCreateUserFontDemoFilesOrdersPlanesAndRejectsInvalidPlane(t *testing.T) {
 	t.Run("ordered filenames", func(t *testing.T) {
 		ops := noOpFontDemoOperations()
-		ops.userFont = func(string) (font.TTFLight, bool, error) {
+		ops.userFont = func(context.Context, string) (font.TTFLight, bool, error) {
 			return font.TTFLight{Planes: map[int]bool{2: true, 0: true, 1: true}}, true, nil
 		}
 		var fileNames []string
-		ops.createPDFFile = func(_ *model.XRefTable, fileName string, _ *model.Configuration) error {
+		ops.createPDFFile = func(c context.Context, _ *model.XRefTable, fileName string, _ *model.Configuration) error {
 			fileNames = append(fileNames, filepath.Base(fileName))
 			return nil
 		}
-		if err := createUserFontDemoFiles(t.TempDir(), "Demo", ops); err != nil {
+		dir := t.TempDir()
+		result, err := createUserFontCheatSheetsUsing(t.Context(), dir, "Demo", ops)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if got, want := strings.Join(fileNames, ","), "Demo_BMP.pdf,Demo_SMP.pdf,Demo_SIP.pdf"; got != want {
+		want := "Demo_BMP.pdf,Demo_SMP.pdf,Demo_SIP.pdf"
+		if got := strings.Join(fileNames, ","); got != want {
 			t.Fatalf("expected %q, got %q", want, got)
+		}
+		paths := []string{
+			filepath.Join(dir, "Demo_BMP.pdf"),
+			filepath.Join(dir, "Demo_SMP.pdf"),
+			filepath.Join(dir, "Demo_SIP.pdf"),
+		}
+		if got, want := strings.Join(result.Paths, ","), strings.Join(paths, ","); got != want {
+			t.Fatalf("expected published paths %q, got %q", want, got)
 		}
 	})
 
 	t.Run("invalid plane before output", func(t *testing.T) {
 		ops := noOpFontDemoOperations()
-		ops.userFont = func(string) (font.TTFLight, bool, error) {
+		ops.userFont = func(context.Context, string) (font.TTFLight, bool, error) {
 			return font.TTFLight{Planes: map[int]bool{17: true}}, true, nil
 		}
 		createCalls := 0
@@ -656,7 +779,7 @@ func TestCreateUserFontDemoFilesOrdersPlanesAndRejectsInvalidPlane(t *testing.T)
 			createCalls++
 			return nil, nil
 		}
-		err := createUserFontDemoFiles(t.TempDir(), "Demo", ops)
+		_, err := createUserFontCheatSheetsUsing(t.Context(), t.TempDir(), "Demo", ops)
 		if !errors.Is(err, ErrInvalidUnicodePlane) {
 			t.Fatalf("expected %v, got %v", ErrInvalidUnicodePlane, err)
 		}
@@ -673,11 +796,11 @@ func TestCreateUserFontDemoFilesValidatesAndLoadsFont(t *testing.T) {
 	t.Run("missing name", func(t *testing.T) {
 		loadCalls := 0
 		ops := noOpFontDemoOperations()
-		ops.loadUserFonts = func() error {
+		ops.loadUserFonts = func(context.Context) error {
 			loadCalls++
 			return nil
 		}
-		err := createUserFontDemoFiles(t.TempDir(), " ", ops)
+		_, err := createUserFontCheatSheetsUsing(t.Context(), t.TempDir(), " ", ops)
 		if err == nil || !strings.Contains(err.Error(), "font name must not be empty") {
 			t.Fatalf("expected missing font name error, got %v", err)
 		}
@@ -689,8 +812,8 @@ func TestCreateUserFontDemoFilesValidatesAndLoadsFont(t *testing.T) {
 	t.Run("load error", func(t *testing.T) {
 		wantErr := errors.New("load fonts")
 		ops := noOpFontDemoOperations()
-		ops.loadUserFonts = func() error { return wantErr }
-		err := createUserFontDemoFiles(t.TempDir(), "Demo", ops)
+		ops.loadUserFonts = func(context.Context) error { return wantErr }
+		_, err := createUserFontCheatSheetsUsing(t.Context(), t.TempDir(), "Demo", ops)
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("expected %v, got %v", wantErr, err)
 		}
@@ -702,8 +825,8 @@ func TestCreateUserFontDemoFilesValidatesAndLoadsFont(t *testing.T) {
 	t.Run("default name error", func(t *testing.T) {
 		wantErr := errors.New("list fonts")
 		ops := noOpFontDemoOperations()
-		ops.userFontNames = func() ([]string, error) { return nil, wantErr }
-		err := createCheatSheetsUserFonts(nil, ops)
+		ops.userFontNames = func(context.Context) ([]string, error) { return nil, wantErr }
+		_, err := createCheatSheetsUserFontsUsing(t.Context(), nil, ops)
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("expected %v, got %v", wantErr, err)
 		}
@@ -714,10 +837,10 @@ func TestCreateUserFontDemoFilesValidatesAndLoadsFont(t *testing.T) {
 
 	t.Run("unavailable font", func(t *testing.T) {
 		ops := noOpFontDemoOperations()
-		ops.userFont = func(string) (font.TTFLight, bool, error) {
+		ops.userFont = func(context.Context, string) (font.TTFLight, bool, error) {
 			return font.TTFLight{}, false, nil
 		}
-		err := createUserFontDemoFiles(t.TempDir(), "Missing", ops)
+		_, err := createUserFontCheatSheetsUsing(t.Context(), t.TempDir(), "Missing", ops)
 		if !errors.Is(err, ErrUserFontNotFound) {
 			t.Fatalf("expected %v, got %v", ErrUserFontNotFound, err)
 		}
@@ -730,20 +853,20 @@ func TestCreateUserFontDemoFilesValidatesAndLoadsFont(t *testing.T) {
 func TestCreateUserFontDemoFilesPreservesPhaseErrors(t *testing.T) {
 	tests := []struct {
 		name      string
-		configure func(*fontDemoOperations, error)
+		configure func(*fontCheatSheetOperations, error)
 		wantPhase string
 	}{
 		{
 			name: "create PDF context",
-			configure: func(ops *fontDemoOperations, wantErr error) {
+			configure: func(ops *fontCheatSheetOperations, wantErr error) {
 				ops.createXRef = func() (*model.XRefTable, error) { return nil, wantErr }
 			},
 			wantPhase: "create PDF context",
 		},
 		{
 			name: "render page",
-			configure: func(ops *fontDemoOperations, wantErr error) {
-				ops.createPage = func(*model.XRefTable, int, int, int, string) (model.Page, error) {
+			configure: func(ops *fontCheatSheetOperations, wantErr error) {
+				ops.createPage = func(context.Context, *model.XRefTable, int, int, int, string) (model.Page, error) {
 					return model.Page{}, wantErr
 				}
 			},
@@ -751,7 +874,7 @@ func TestCreateUserFontDemoFilesPreservesPhaseErrors(t *testing.T) {
 		},
 		{
 			name: "access catalog",
-			configure: func(ops *fontDemoOperations, wantErr error) {
+			configure: func(ops *fontCheatSheetOperations, wantErr error) {
 				ops.catalog = func(*model.XRefTable) (types.Dict, error) {
 					return nil, wantErr
 				}
@@ -760,8 +883,8 @@ func TestCreateUserFontDemoFilesPreservesPhaseErrors(t *testing.T) {
 		},
 		{
 			name: "build page tree",
-			configure: func(ops *fontDemoOperations, wantErr error) {
-				ops.addPageTree = func(*model.XRefTable, types.Dict, model.Page) error {
+			configure: func(ops *fontCheatSheetOperations, wantErr error) {
+				ops.addPageTree = func(context.Context, *model.XRefTable, types.Dict, model.Page) error {
 					return wantErr
 				}
 			},
@@ -769,8 +892,8 @@ func TestCreateUserFontDemoFilesPreservesPhaseErrors(t *testing.T) {
 		},
 		{
 			name: "write output",
-			configure: func(ops *fontDemoOperations, wantErr error) {
-				ops.createPDFFile = func(*model.XRefTable, string, *model.Configuration) error {
+			configure: func(ops *fontCheatSheetOperations, wantErr error) {
+				ops.createPDFFile = func(context.Context, *model.XRefTable, string, *model.Configuration) error {
 					return fmt.Errorf("create: write output: %w", wantErr)
 				}
 			},
@@ -783,7 +906,7 @@ func TestCreateUserFontDemoFilesPreservesPhaseErrors(t *testing.T) {
 			wantErr := errors.New("underlying failure")
 			ops := noOpFontDemoOperations()
 			tt.configure(&ops, wantErr)
-			err := createUserFontDemoFiles(t.TempDir(), "Demo", ops)
+			_, err := createUserFontCheatSheetsUsing(t.Context(), t.TempDir(), "Demo", ops)
 			if !errors.Is(err, wantErr) {
 				t.Fatalf("expected %v, got %v", wantErr, err)
 			}
@@ -801,17 +924,18 @@ func TestCreateUserFontDemoFilesPreservesPhaseErrors(t *testing.T) {
 
 func TestCreateCheatSheetsUserFontsDoesNotMutateInputAndSortsWork(t *testing.T) {
 	ops := noOpFontDemoOperations()
-	ops.userFont = func(string) (font.TTFLight, bool, error) {
+	ops.userFont = func(context.Context, string) (font.TTFLight, bool, error) {
 		return font.TTFLight{Planes: map[int]bool{0: true}}, true, nil
 	}
 	var fileNames []string
-	ops.createPDFFile = func(_ *model.XRefTable, fileName string, _ *model.Configuration) error {
+	ops.createPDFFile = func(c context.Context, _ *model.XRefTable, fileName string, _ *model.Configuration) error {
 		fileNames = append(fileNames, filepath.Base(fileName))
 		return nil
 	}
 
 	fontNames := []string{"Zulu", "Alpha"}
-	if err := createCheatSheetsUserFonts(fontNames, ops); err != nil {
+	result, err := createCheatSheetsUserFontsUsing(t.Context(), fontNames, ops)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := strings.Join(fontNames, ","), "Zulu,Alpha"; got != want {
@@ -819,6 +943,9 @@ func TestCreateCheatSheetsUserFontsDoesNotMutateInputAndSortsWork(t *testing.T) 
 	}
 	if got, want := strings.Join(fileNames, ","), "Alpha_BMP.pdf,Zulu_BMP.pdf"; got != want {
 		t.Fatalf("expected deterministic work order %q, got %q", want, got)
+	}
+	if got, want := strings.Join(result.Paths, ","), "Alpha_BMP.pdf,Zulu_BMP.pdf"; got != want {
+		t.Fatalf("expected published paths %q, got %q", want, got)
 	}
 }
 
@@ -831,7 +958,7 @@ func TestCheatSheetBatchGenerationFailureLeavesOutputsUntouched(t *testing.T) {
 	wantErr := errors.New("generate Zulu")
 	ops := noOpFontDemoOperations()
 	ops.files = defaultCheatSheetFileOperations()
-	ops.createPDFFile = func(_ *model.XRefTable, fileName string, _ *model.Configuration) error {
+	ops.createPDFFile = func(c context.Context, _ *model.XRefTable, fileName string, _ *model.Configuration) error {
 		if filepath.Base(fileName) == "Zulu_BMP.pdf" {
 			return wantErr
 		}
@@ -841,7 +968,7 @@ func TestCheatSheetBatchGenerationFailureLeavesOutputsUntouched(t *testing.T) {
 		"Alpha": {Planes: map[int]bool{0: true}},
 		"Zulu":  {Planes: map[int]bool{0: true}},
 	}
-	err := createUserFontDemoBatch(dir, []string{"Alpha", "Zulu"}, fonts, ops)
+	_, err := createUserFontCheatSheetBatch(t.Context(), dir, []string{"Alpha", "Zulu"}, fonts, ops)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
@@ -874,14 +1001,14 @@ func TestCheatSheetPublicationFailureRollsBackEarlierFiles(t *testing.T) {
 		}
 		return rename(source, target)
 	}
-	ops.createPDFFile = func(_ *model.XRefTable, fileName string, _ *model.Configuration) error {
+	ops.createPDFFile = func(c context.Context, _ *model.XRefTable, fileName string, _ *model.Configuration) error {
 		return os.WriteFile(fileName, []byte("new "+filepath.Base(fileName)), 0600)
 	}
 	fonts := map[string]font.TTFLight{
 		"Alpha": {Planes: map[int]bool{0: true}},
 		"Zulu":  {Planes: map[int]bool{0: true}},
 	}
-	err := createUserFontDemoBatch(dir, []string{"Alpha", "Zulu"}, fonts, ops)
+	_, err := createUserFontCheatSheetBatch(t.Context(), dir, []string{"Alpha", "Zulu"}, fonts, ops)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
@@ -918,14 +1045,14 @@ func TestCheatSheetPublicationFailureJoinsRollbackFailure(t *testing.T) {
 			return rename(source, target)
 		}
 	}
-	ops.createPDFFile = func(_ *model.XRefTable, fileName string, _ *model.Configuration) error {
+	ops.createPDFFile = func(c context.Context, _ *model.XRefTable, fileName string, _ *model.Configuration) error {
 		return os.WriteFile(fileName, []byte("new "+filepath.Base(fileName)), 0600)
 	}
 	fonts := map[string]font.TTFLight{
 		"Alpha": {Planes: map[int]bool{0: true}},
 		"Zulu":  {Planes: map[int]bool{0: true}},
 	}
-	err := createUserFontDemoBatch(dir, []string{"Alpha", "Zulu"}, fonts, ops)
+	_, err := createUserFontCheatSheetBatch(t.Context(), dir, []string{"Alpha", "Zulu"}, fonts, ops)
 	if !errors.Is(err, publishErr) || !errors.Is(err, rollbackErr) {
 		t.Fatalf("expected joined publication and rollback errors, got %v", err)
 	}
@@ -946,13 +1073,16 @@ func TestCheatSheetCleanupFailureAfterPublicationReturnsError(t *testing.T) {
 		}
 		return removeAll(path)
 	}
-	ops.createPDFFile = func(_ *model.XRefTable, fileName string, _ *model.Configuration) error {
+	ops.createPDFFile = func(c context.Context, _ *model.XRefTable, fileName string, _ *model.Configuration) error {
 		return os.WriteFile(fileName, []byte("published"), 0600)
 	}
 	fonts := map[string]font.TTFLight{"Demo": {Planes: map[int]bool{0: true}}}
-	err := createUserFontDemoBatch(dir, []string{"Demo"}, fonts, ops)
+	paths, err := createUserFontCheatSheetBatch(t.Context(), dir, []string{"Demo"}, fonts, ops)
 	if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "published cheat sheets") {
 		t.Fatalf("expected published cleanup error, got %v", err)
+	}
+	if got, want := strings.Join(paths, ","), filepath.Join(dir, "Demo_BMP.pdf"); got != want {
+		t.Fatalf("expected published path %q, got %q", want, got)
 	}
 	bb, readErr := os.ReadFile(filepath.Join(dir, "Demo_BMP.pdf"))
 	if readErr != nil {
@@ -967,17 +1097,17 @@ func TestCreateCheatSheetsUserFontsLoadsDefaultsAndRejectsUnknownFonts(t *testin
 	t.Run("all installed fonts", func(t *testing.T) {
 		ops := noOpFontDemoOperations()
 		loadCalls := 0
-		ops.loadUserFonts = func() error {
+		ops.loadUserFonts = func(context.Context) error {
 			loadCalls++
 			return nil
 		}
-		ops.userFontNames = func() ([]string, error) {
+		ops.userFontNames = func(context.Context) ([]string, error) {
 			return []string{"Zulu", "Alpha"}, nil
 		}
-		ops.userFont = func(string) (font.TTFLight, bool, error) {
+		ops.userFont = func(context.Context, string) (font.TTFLight, bool, error) {
 			return font.TTFLight{}, true, nil
 		}
-		if err := createCheatSheetsUserFonts(nil, ops); err != nil {
+		if _, err := createCheatSheetsUserFontsUsing(t.Context(), nil, ops); err != nil {
 			t.Fatal(err)
 		}
 		if loadCalls != 1 {
@@ -988,8 +1118,8 @@ func TestCreateCheatSheetsUserFontsLoadsDefaultsAndRejectsUnknownFonts(t *testin
 	t.Run("load error", func(t *testing.T) {
 		wantErr := errors.New("load fonts")
 		ops := noOpFontDemoOperations()
-		ops.loadUserFonts = func() error { return wantErr }
-		err := createCheatSheetsUserFonts([]string{"Demo"}, ops)
+		ops.loadUserFonts = func(context.Context) error { return wantErr }
+		_, err := createCheatSheetsUserFontsUsing(t.Context(), []string{"Demo"}, ops)
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("expected %v, got %v", wantErr, err)
 		}
@@ -1000,7 +1130,7 @@ func TestCreateCheatSheetsUserFontsLoadsDefaultsAndRejectsUnknownFonts(t *testin
 
 	t.Run("unknown explicit font", func(t *testing.T) {
 		ops := noOpFontDemoOperations()
-		ops.userFont = func(fontName string) (font.TTFLight, bool, error) {
+		ops.userFont = func(c context.Context, fontName string) (font.TTFLight, bool, error) {
 			return font.TTFLight{}, fontName != "Missing", nil
 		}
 		createCalls := 0
@@ -1008,7 +1138,7 @@ func TestCreateCheatSheetsUserFontsLoadsDefaultsAndRejectsUnknownFonts(t *testin
 			createCalls++
 			return nil, nil
 		}
-		err := createCheatSheetsUserFonts([]string{"Known", "Missing"}, ops)
+		_, err := createCheatSheetsUserFontsUsing(t.Context(), []string{"Known", "Missing"}, ops)
 		if !errors.Is(err, ErrUserFontNotFound) {
 			t.Fatalf("expected %v, got %v", ErrUserFontNotFound, err)
 		}
@@ -1023,13 +1153,13 @@ func TestCreateCheatSheetsUserFontsLoadsDefaultsAndRejectsUnknownFonts(t *testin
 	t.Run("delegated output error", func(t *testing.T) {
 		wantErr := errors.New("underlying failure")
 		ops := noOpFontDemoOperations()
-		ops.userFont = func(string) (font.TTFLight, bool, error) {
+		ops.userFont = func(context.Context, string) (font.TTFLight, bool, error) {
 			return font.TTFLight{Planes: map[int]bool{0: true}}, true, nil
 		}
-		ops.createPDFFile = func(*model.XRefTable, string, *model.Configuration) error {
+		ops.createPDFFile = func(context.Context, *model.XRefTable, string, *model.Configuration) error {
 			return fmt.Errorf("create: write output: %w", wantErr)
 		}
-		err := createCheatSheetsUserFonts([]string{"Demo"}, ops)
+		_, err := createCheatSheetsUserFontsUsing(t.Context(), []string{"Demo"}, ops)
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("expected %v, got %v", wantErr, err)
 		}

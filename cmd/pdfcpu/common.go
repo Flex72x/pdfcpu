@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/pdfcpu/pdfcpu/internal/contextutil"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/cli"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
@@ -42,16 +44,35 @@ func wrapHandler(handler func(*model.Configuration, []string) error) func(*cobra
 		if err != nil {
 			return commandError(err)
 		}
-		if conf.Version != model.VersionStr {
-			model.CheckConfigVersion(conf.Version)
-		}
 		return commandError(handler(conf, args))
+	}
+}
+
+func wrapContextHandler(handler func(context.Context, *model.Configuration, []string) error) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		c := cmd.Context()
+		if err := contextutil.Check(c); err != nil {
+			return err
+		}
+		passwords, err := commandPasswords(cmd)
+		if err != nil {
+			return commandError(err)
+		}
+		conf, err := getConfig()
+		if err != nil {
+			return commandError(err)
+		}
+		applyCommandPasswords(conf, passwords)
+		return commandError(handler(c, conf, args))
 	}
 }
 
 func commandError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if schemaErr := newConfigurationSchemaCommandError(err); schemaErr != nil {
+		return schemaErr
 	}
 	if !strings.HasPrefix(err.Error(), pdfcpuErrPrefix) {
 		return err
@@ -74,11 +95,13 @@ func (e prefixStrippedError) Unwrap() error {
 func addPasswordFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&upw, "upw", "", "user password")
 	cmd.Flags().StringVar(&opw, "opw", "", "owner password")
+	addPasswordFileFlags(cmd, false)
 }
 
 func addPersistentPasswordFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().StringVar(&upw, "upw", "", "user password")
 	cmd.PersistentFlags().StringVar(&opw, "opw", "", "owner password")
+	addPasswordFileFlags(cmd, true)
 }
 
 func addSelectedPagesFlag(cmd *cobra.Command) {
@@ -289,13 +312,13 @@ func configureDisplayUnit(conf *model.Configuration) error {
 	return nil
 }
 
-type commandDispatch func(*cli.Command) ([]string, error)
+type commandDispatch func(context.Context, *cli.Command) ([]string, error)
 
-func runCommandWithOutput(cmd *cli.Command, w io.Writer, dispatch commandDispatch, suppressOutput bool) error {
+func runCommandWithOutput(c context.Context, cmd *cli.Command, w io.Writer, dispatch commandDispatch, suppressOutput bool) error {
 	if cmd == nil {
 		return errors.New("pdfcpu: missing command")
 	}
-	out, dispatchErr := dispatch(cmd)
+	out, dispatchErr := dispatch(c, cmd)
 	var writeErr error
 	if out != nil && !suppressOutput {
 		for i, s := range out {
@@ -308,10 +331,16 @@ func runCommandWithOutput(cmd *cli.Command, w io.Writer, dispatch commandDispatc
 	return errors.Join(dispatchErr, writeErr)
 }
 
-// runCommand dispatches a CLI command and writes command output.
-func runCommand(cmd *cli.Command) error {
+func runCommand(c context.Context, cmd *cli.Command) error {
 	if cmd != nil && cmd.ErrorOutput == nil {
 		cmd.ErrorOutput = os.Stderr
 	}
-	return runCommandWithOutput(cmd, os.Stdout, cli.Dispatch, quiet)
+	if cmd != nil {
+		if quiet {
+			cmd.NoticeOutput = nil
+		} else if cmd.NoticeOutput == nil {
+			cmd.NoticeOutput = os.Stderr
+		}
+	}
+	return runCommandWithOutput(c, cmd, os.Stdout, cli.Dispatch, quiet)
 }

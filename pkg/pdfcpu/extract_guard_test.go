@@ -31,6 +31,176 @@ func emptyStreamDict() *types.StreamDict {
 	return &types.StreamDict{Dict: types.Dict{}}
 }
 
+func booleanImageStreamDict() *types.StreamDict {
+	return &types.StreamDict{
+		Dict: types.Dict{
+			"BitsPerComponent": types.Integer(8),
+			"ColorSpace":       types.Name(model.DeviceGrayCS),
+			"Height":           types.Integer(1),
+			"Length":           types.Integer(1),
+			"Width":            types.Integer(1),
+		},
+		Raw: []byte{0},
+	}
+}
+
+// TestExtractImageResolvesIndirectBooleanEntries verifies image metadata uses resolved boolean values.
+func TestExtractImageResolvesIndirectBooleanEntries(t *testing.T) {
+	ir := *types.NewIndirectRef(9, 0)
+	ctx := &model.Context{XRefTable: &model.XRefTable{
+		Table: map[int]*model.XRefTableEntry{
+			9: model.NewXRefTableEntryGen0(types.Boolean(true)),
+		},
+	}}
+	sd := booleanImageStreamDict()
+	sd.Insert("ImageMask", ir)
+	sd.Insert("Interpolate", ir)
+
+	img, err := ExtractImage(t.Context(), ctx, sd, false, "Im0", 7, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !img.IsImgMask || !img.Interpol {
+		t.Fatalf("got ImageMask=%t Interpolate=%t, want both true", img.IsImgMask, img.Interpol)
+	}
+}
+
+// TestExtractImageResolvesIndirectIntegerEntries verifies image metadata uses resolved dimensions and bit depth.
+func TestExtractImageResolvesIndirectIntegerEntries(t *testing.T) {
+	ctx := &model.Context{XRefTable: &model.XRefTable{
+		Table: map[int]*model.XRefTableEntry{
+			10: model.NewXRefTableEntryGen0(types.Integer(1)),
+			11: model.NewXRefTableEntryGen0(types.Integer(8)),
+		},
+	}}
+	sd := booleanImageStreamDict()
+	sd.Insert("Width", *types.NewIndirectRef(10, 0))
+	sd.Insert("Height", *types.NewIndirectRef(10, 0))
+	sd.Insert("BitsPerComponent", *types.NewIndirectRef(11, 0))
+
+	img, err := ExtractImage(t.Context(), ctx, sd, false, "Im0", 7, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Width != 1 || img.Height != 1 || img.Bpc != 8 {
+		t.Fatalf("got width=%d height=%d bpc=%d, want 1x1 at 8 bpc", img.Width, img.Height, img.Bpc)
+	}
+}
+
+func TestStreamLengthResolvesIndirectInteger(t *testing.T) {
+	indRef := *types.NewIndirectRef(12, 0)
+	ctx := &model.Context{XRefTable: &model.XRefTable{Table: map[int]*model.XRefTableEntry{
+		12: model.NewXRefTableEntryGen0(types.Integer(99)),
+	}}}
+	sd := &types.StreamDict{Dict: types.Dict{"Length": indRef}}
+
+	got, err := StreamLength(ctx, sd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 99 {
+		t.Fatalf("stream length = %d, want 99", got)
+	}
+	if sd.Dict["Length"] != indRef {
+		t.Fatalf("Length = %v, want original indirect reference", sd.Dict["Length"])
+	}
+}
+
+// TestICCBasedColorSpaceComponentsResolvesIndirectN verifies ICC component lookup resolves the profile entry.
+func TestICCBasedColorSpaceComponentsResolvesIndirectN(t *testing.T) {
+	xRefTable := &model.XRefTable{Table: map[int]*model.XRefTableEntry{
+		20: model.NewXRefTableEntryGen0(types.Integer(3)),
+		21: model.NewXRefTableEntryGen0(types.StreamDict{Dict: types.Dict{
+			"N": *types.NewIndirectRef(20, 0),
+		}}),
+	}}
+	sd := &types.StreamDict{Dict: types.Dict{
+		"ColorSpace": types.Array{types.Name(model.ICCBasedCS), *types.NewIndirectRef(21, 0)},
+	}}
+
+	got, err := ColorSpaceComponents(xRefTable, sd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 3 {
+		t.Fatalf("got %d components, want 3", got)
+	}
+}
+
+// TestPrepareImageDecodeResolvesCCITTIntegers verifies decode parameters and the Height fallback are xref-aware.
+func TestPrepareImageDecodeResolvesCCITTIntegers(t *testing.T) {
+	xRefTable := &model.XRefTable{Table: map[int]*model.XRefTableEntry{
+		30: model.NewXRefTableEntryGen0(types.Integer(-1)),
+		31: model.NewXRefTableEntryGen0(types.Integer(1728)),
+		32: model.NewXRefTableEntryGen0(types.Integer(12)),
+		33: model.NewXRefTableEntryGen0(types.Integer(9)),
+	}}
+
+	tests := []struct {
+		name     string
+		rows     types.Object
+		wantRows int
+	}{
+		{"height fallback", nil, 12},
+		{"indirect rows", *types.NewIndirectRef(33, 0), 9},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parms := types.Dict{
+				"K":       *types.NewIndirectRef(30, 0),
+				"Columns": *types.NewIndirectRef(31, 0),
+			}
+			if tt.rows != nil {
+				parms["Rows"] = tt.rows
+			}
+			sd := &types.StreamDict{
+				Dict: types.Dict{"Height": *types.NewIndirectRef(32, 0)},
+				FilterPipeline: []types.PDFFilter{{
+					Name:        filter.CCITTFax,
+					DecodeParms: parms,
+				}},
+			}
+
+			if err := prepareImageDecode(xRefTable, sd, "test image"); err != nil {
+				t.Fatal(err)
+			}
+			got := sd.FilterPipeline[0].DecodeParms
+			if k, columns, rows := got.IntEntry("K"), got.IntEntry("Columns"), got.IntEntry("Rows"); k == nil || *k != -1 || columns == nil || *columns != 1728 || rows == nil || *rows != tt.wantRows {
+				t.Fatalf("got decode parameters %v, want K=-1 Columns=1728 Rows=%d", got, tt.wantRows)
+			}
+			if _, ok := parms["K"].(types.IndirectRef); !ok {
+				t.Fatalf("raw decode parameters were mutated: %v", parms)
+			}
+		})
+	}
+}
+
+// TestExtractImageBooleanErrorsIncludeContext verifies invalid boolean references are not treated as defaults.
+func TestExtractImageBooleanErrorsIncludeContext(t *testing.T) {
+	for _, key := range []string{"ImageMask", "Interpolate"} {
+		t.Run(key, func(t *testing.T) {
+			ctx := &model.Context{XRefTable: &model.XRefTable{Table: map[int]*model.XRefTableEntry{}}}
+			sd := booleanImageStreamDict()
+			sd.Insert(key, *types.NewIndirectRef(9, 0))
+
+			_, err := ExtractImage(t.Context(), ctx, sd, false, "Im0", 7, true)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			for _, want := range []string{"image obj#7", key} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("missing %q in %q", want, err)
+				}
+			}
+
+			var validationErr *model.ValidationError
+			if !errors.As(err, &validationErr) || validationErr.ObjectNumber() != 9 {
+				t.Fatalf("got object attribution %v, want object #9", validationErr)
+			}
+		})
+	}
+}
+
 // TestExtractFunctionsRejectMissingInput verifies stable extraction precondition errors.
 func TestExtractFunctionsRejectMissingInput(t *testing.T) {
 	ctx := &model.Context{XRefTable: &model.XRefTable{}}
@@ -74,7 +244,7 @@ func TestExtractFunctionsRejectMissingInput(t *testing.T) {
 		{
 			name: "extract image missing context",
 			fn: func() error {
-				_, err := ExtractImage(nil, emptyStreamDict(), false, "", 1, true)
+				_, err := ExtractImage(t.Context(), nil, emptyStreamDict(), false, "", 1, true)
 				return err
 			},
 			wantErr: ErrMissingPDFContext,
@@ -82,7 +252,7 @@ func TestExtractFunctionsRejectMissingInput(t *testing.T) {
 		{
 			name: "extract page images missing optimization context",
 			fn: func() error {
-				_, err := ExtractPageImages(ctx, 1, true)
+				_, err := ExtractPageImages(t.Context(), ctx, 1, true)
 				return err
 			},
 			wantErr: ErrMissingOptimizationContext,
@@ -90,7 +260,7 @@ func TestExtractFunctionsRejectMissingInput(t *testing.T) {
 		{
 			name: "extract font missing context",
 			fn: func() error {
-				_, err := ExtractFont(nil, model.FontObject{}, 1)
+				_, err := ExtractFont(t.Context(), nil, model.FontObject{}, 1)
 				return err
 			},
 			wantErr: ErrMissingPDFContext,
@@ -98,7 +268,7 @@ func TestExtractFunctionsRejectMissingInput(t *testing.T) {
 		{
 			name: "extract page fonts missing optimization context",
 			fn: func() error {
-				_, err := ExtractPageFonts(ctx, 1, nil, nil)
+				_, err := ExtractPageFonts(t.Context(), ctx, 1, nil, nil)
 				return err
 			},
 			wantErr: ErrMissingOptimizationContext,
@@ -106,7 +276,7 @@ func TestExtractFunctionsRejectMissingInput(t *testing.T) {
 		{
 			name: "extract form fonts missing optimization context",
 			fn: func() error {
-				_, err := ExtractFormFonts(ctx)
+				_, err := ExtractFormFonts(t.Context(), ctx)
 				return err
 			},
 			wantErr: ErrMissingOptimizationContext,
@@ -114,7 +284,7 @@ func TestExtractFunctionsRejectMissingInput(t *testing.T) {
 		{
 			name: "extract page content missing context",
 			fn: func() error {
-				_, err := ExtractPageContent(nil, 1)
+				_, err := ExtractPageContent(t.Context(), nil, 1)
 				return err
 			},
 			wantErr: ErrMissingPDFContext,
@@ -122,7 +292,7 @@ func TestExtractFunctionsRejectMissingInput(t *testing.T) {
 		{
 			name: "extract metadata missing context",
 			fn: func() error {
-				_, err := ExtractMetadata(nil)
+				_, err := ExtractMetadata(t.Context(), nil)
 				return err
 			},
 			wantErr: ErrMissingPDFContext,
@@ -141,7 +311,7 @@ func TestExtractFunctionsRejectMissingInput(t *testing.T) {
 
 // TestExtractImageRejectsNilStream verifies the corresponding behavior.
 func TestExtractImageRejectsNilStream(t *testing.T) {
-	_, err := ExtractImage(nil, nil, false, "", 1, true)
+	_, err := ExtractImage(t.Context(), nil, nil, false, "", 1, true)
 	if !errors.Is(err, ErrMissingStreamDict) {
 		t.Fatalf("expected %v, got %v", ErrMissingStreamDict, err)
 	}
@@ -165,7 +335,11 @@ func TestObjNrsRejectMissingOptimizationContext(t *testing.T) {
 	if objNrs := ImageObjNrs(ctx, 1); len(objNrs) != 0 {
 		t.Fatalf("expected no image objects, got %v", objNrs)
 	}
-	if objNrs := FontObjNrs(ctx, 1); len(objNrs) != 0 {
+	objNrs, err := FontObjNrs(t.Context(), ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objNrs) != 0 {
 		t.Fatalf("expected no font objects, got %v", objNrs)
 	}
 }
@@ -183,7 +357,11 @@ func TestExtractionObjectNumbersAreSorted(t *testing.T) {
 	if got, want := ImageObjNrs(ctx, 1), []int{2, 9}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("image object numbers: got %v, want %v", got, want)
 	}
-	if got, want := FontObjNrs(ctx, 1), []int{3, 8}; !reflect.DeepEqual(got, want) {
+	got, err := FontObjNrs(t.Context(), ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []int{3, 8}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("font object numbers: got %v, want %v", got, want)
 	}
 }
@@ -197,7 +375,7 @@ func TestExtractMetadataProcessesParentObjectsInOrder(t *testing.T) {
 		91: model.NewXRefTableEntryGen0(types.StreamDict{Dict: types.Dict{}, Raw: []byte("nine")}),
 	}}}
 
-	metadata, err := ExtractMetadata(ctx)
+	metadata, err := ExtractMetadata(t.Context(), ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +404,7 @@ func TestExtractionSelectsDeterministicFirstError(t *testing.T) {
 						PageImages: []types.IntSet{{9: true, 2: true}},
 					},
 				}
-				_, err := ExtractPageImages(ctx, 1, true)
+				_, err := ExtractPageImages(t.Context(), ctx, 1, true)
 				return err
 			},
 		},
@@ -240,7 +418,7 @@ func TestExtractionSelectsDeterministicFirstError(t *testing.T) {
 						PageFonts: []types.IntSet{{8: true, 3: true}},
 					},
 				}
-				_, err := ExtractPageFonts(ctx, 1, nil, nil)
+				_, err := ExtractPageFonts(t.Context(), ctx, 1, nil, nil)
 				return err
 			},
 		},
@@ -254,7 +432,7 @@ func TestExtractionSelectsDeterministicFirstError(t *testing.T) {
 						FormFontObjects: map[int]*model.FontObject{9: nil, 2: nil},
 					},
 				}
-				_, err := ExtractFormFonts(ctx)
+				_, err := ExtractFormFonts(t.Context(), ctx)
 				return err
 			},
 		},
@@ -266,7 +444,7 @@ func TestExtractionSelectsDeterministicFirstError(t *testing.T) {
 					3: model.NewXRefTableEntryGen0(types.Dict{"Metadata": types.StreamDict{Dict: types.Dict{}}}),
 					9: model.NewXRefTableEntryGen0(types.Dict{"Metadata": types.StreamDict{Dict: types.Dict{}}}),
 				}}}
-				_, err := ExtractMetadata(ctx)
+				_, err := ExtractMetadata(t.Context(), ctx)
 				return err
 			},
 		},
@@ -303,7 +481,7 @@ func TestUnsupportedExtractionResourcesReturnSentinel(t *testing.T) {
 			fn: func() error {
 				ctx := &model.Context{XRefTable: &model.XRefTable{}}
 				sd := &types.StreamDict{Dict: types.Dict{}, FilterPipeline: []types.PDFFilter{{Name: "Unsupported"}}}
-				_, err := ExtractImage(ctx, sd, false, "Im0", 7, false)
+				_, err := ExtractImage(t.Context(), ctx, sd, false, "Im0", 7, false)
 				return err
 			},
 		},
@@ -321,7 +499,7 @@ func TestUnsupportedExtractionResourcesReturnSentinel(t *testing.T) {
 					},
 					Raw: []byte{0},
 				}
-				_, err := ExtractImage(ctx, sd, false, "Im0", 7, false)
+				_, err := ExtractImage(t.Context(), ctx, sd, false, "Im0", 7, false)
 				return err
 			},
 		},
@@ -337,7 +515,7 @@ func TestUnsupportedExtractionResourcesReturnSentinel(t *testing.T) {
 						"FontDescriptor": types.Dict{"FontFile": *types.NewIndirectRef(80, 0)},
 					},
 				}
-				_, err := ExtractFont(ctx, fontObject, 8)
+				_, err := ExtractFont(t.Context(), ctx, fontObject, 8)
 				return err
 			},
 		},
@@ -354,7 +532,7 @@ func TestUnsupportedExtractionResourcesReturnSentinel(t *testing.T) {
 						FilterPipeline: unsupportedPipeline,
 					}),
 				}}}
-				_, err := ExtractMetadata(ctx)
+				_, err := ExtractMetadata(t.Context(), ctx)
 				return err
 			},
 		},
@@ -393,12 +571,12 @@ func TestExtractMetadataUnsupportedResourcePolicyControlsContinuation(t *testing
 		}
 	}
 
-	_, err := ExtractMetadata(newContext(model.UnsupportedResourceSkip))
+	_, err := ExtractMetadata(t.Context(), newContext(model.UnsupportedResourceSkip))
 	if !errors.Is(err, ErrUnsupportedResource) || !strings.Contains(err.Error(), "metadata parent obj#9: metadata obj#90") {
 		t.Fatalf("skip policy must report all unsupported resources, got %v", err)
 	}
 
-	_, err = ExtractMetadata(newContext(model.UnsupportedResourceFail))
+	_, err = ExtractMetadata(t.Context(), newContext(model.UnsupportedResourceFail))
 	if !errors.Is(err, ErrUnsupportedResource) {
 		t.Fatalf("fail policy must preserve %v, got %v", ErrUnsupportedResource, err)
 	}
@@ -454,7 +632,7 @@ func TestExtractPageImagesUnsupportedResourcePolicyControlsContinuation(t *testi
 				},
 			},
 		}
-		_, err := ExtractPageImages(ctx, 1, false)
+		_, err := ExtractPageImages(t.Context(), ctx, 1, false)
 		return err
 	}
 
@@ -471,7 +649,8 @@ func unsupportedFontObject(name string, fileObjNr int) *model.FontObject {
 	}
 }
 
-// TestExtractPageFontsUnsupportedResourcePolicyControlsContinuation verifies page-font skip and fail extraction behavior.
+// TestExtractPageFontsUnsupportedResourcePolicyControlsContinuation verifies page-font skip and fail extraction
+// behavior.
 func TestExtractPageFontsUnsupportedResourcePolicyControlsContinuation(t *testing.T) {
 	extract := func(policy model.UnsupportedResourcePolicy) error {
 		ctx := &model.Context{
@@ -485,14 +664,15 @@ func TestExtractPageFontsUnsupportedResourcePolicyControlsContinuation(t *testin
 				},
 			},
 		}
-		_, err := ExtractPageFonts(ctx, 1, nil, nil)
+		_, err := ExtractPageFonts(t.Context(), ctx, 1, nil, nil)
 		return err
 	}
 
 	assertUnsupportedResourcePolicyContinuation(t, "font \"SecondFont\" obj#9", extract)
 }
 
-// TestExtractFormFontsUnsupportedResourcePolicyControlsContinuation verifies form-font skip and fail extraction behavior.
+// TestExtractFormFontsUnsupportedResourcePolicyControlsContinuation verifies form-font skip and fail extraction
+// behavior.
 func TestExtractFormFontsUnsupportedResourcePolicyControlsContinuation(t *testing.T) {
 	extract := func(policy model.UnsupportedResourcePolicy) error {
 		ctx := &model.Context{
@@ -505,7 +685,7 @@ func TestExtractFormFontsUnsupportedResourcePolicyControlsContinuation(t *testin
 				},
 			},
 		}
-		_, err := ExtractFormFonts(ctx)
+		_, err := ExtractFormFonts(t.Context(), ctx)
 		return err
 	}
 
@@ -539,7 +719,7 @@ func TestExtractPageImagesUsesOneBasedResourceNames(t *testing.T) {
 		},
 	}
 
-	images, err := ExtractPageImages(ctx, 2, true)
+	images, err := ExtractPageImages(t.Context(), ctx, 2, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +733,7 @@ func TestExtractMetadataRejectsDirectMetadataStream(t *testing.T) {
 	ctx := &model.Context{XRefTable: &model.XRefTable{}}
 	d := types.Dict{"Metadata": types.StreamDict{Dict: types.Dict{}}}
 
-	_, err := extractMetadataFromDict(ctx, d, 1)
+	_, err := extractMetadataFromDict(t.Context(), ctx, d, 1)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -572,7 +752,7 @@ func TestExtractPageImagesThumbnailErrorsIncludePageContext(t *testing.T) {
 		Optimize: &model.OptimizationContext{},
 	}
 
-	_, err := ExtractPageImages(ctx, 1, true)
+	_, err := ExtractPageImages(t.Context(), ctx, 1, true)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -592,7 +772,7 @@ func TestExtractFormFontsErrorsIncludeObjectContext(t *testing.T) {
 		},
 	}
 
-	_, err := ExtractFormFonts(ctx)
+	_, err := ExtractFormFonts(t.Context(), ctx)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -605,7 +785,7 @@ func TestExtractFormFontsErrorsIncludeObjectContext(t *testing.T) {
 func TestExtractPageContentErrorsIncludePageContext(t *testing.T) {
 	ctx := &model.Context{XRefTable: &model.XRefTable{PageCount: 1}}
 
-	_, err := ExtractPageContent(ctx, 1)
+	_, err := ExtractPageContent(t.Context(), ctx, 1)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -624,7 +804,7 @@ func TestExtractMetadataErrorsIncludeParentObjectContext(t *testing.T) {
 		},
 	}
 
-	_, err := ExtractMetadata(ctx)
+	_, err := ExtractMetadata(t.Context(), ctx)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -713,7 +893,7 @@ func TestExtractFontDescriptorErrorsIncludeObjectContext(t *testing.T) {
 		FontDict: types.Dict{"FontDescriptor": *types.NewIndirectRef(7, 0)},
 	}
 
-	_, err := ExtractFont(ctx, fontObject, 9)
+	_, err := ExtractFont(t.Context(), ctx, fontObject, 9)
 	if err == nil {
 		t.Fatal("expected error")
 	}

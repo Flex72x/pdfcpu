@@ -18,6 +18,7 @@ package pdfcpu
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -32,6 +33,21 @@ import (
 type writeReaderErrorReader struct {
 	err  error
 	read bool
+}
+
+type writeReaderCancelingReader struct {
+	cancel context.CancelFunc
+	read   bool
+}
+
+func (r *writeReaderCancelingReader) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, errors.New("read after cancellation")
+	}
+	r.read = true
+	n := copy(p, "partial replacement")
+	r.cancel()
+	return n, nil
 }
 
 // Read implements io.Reader.
@@ -108,10 +124,54 @@ func TestValidatePDFImageDimensionsRejectsByteLimit(t *testing.T) {
 	}
 }
 
+// TestPDFImageResolvesIndirectImageMask verifies image writing preserves an indirect image-mask value.
+func TestPDFImageResolvesIndirectImageMask(t *testing.T) {
+	xRefTable := &model.XRefTable{
+		Table: map[int]*model.XRefTableEntry{
+			9: model.NewXRefTableEntryGen0(types.Boolean(true)),
+		},
+	}
+
+	for _, value := range []types.Object{types.Boolean(true), *types.NewIndirectRef(9, 0)} {
+		sd := booleanImageStreamDict()
+		sd.Insert("ImageMask", value)
+
+		im, err := pdfImage(xRefTable, sd, false, 7)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !im.imageMask {
+			t.Fatal("ImageMask=false, want true")
+		}
+	}
+}
+
+// TestPDFImageResolvesIndirectIntegerEntries verifies image writing uses referenced dimensions and bit depth.
+func TestPDFImageResolvesIndirectIntegerEntries(t *testing.T) {
+	xRefTable := &model.XRefTable{
+		Table: map[int]*model.XRefTableEntry{
+			10: model.NewXRefTableEntryGen0(types.Integer(1)),
+			11: model.NewXRefTableEntryGen0(types.Integer(8)),
+		},
+	}
+	sd := booleanImageStreamDict()
+	sd.Insert("Width", *types.NewIndirectRef(10, 0))
+	sd.Insert("Height", *types.NewIndirectRef(10, 0))
+	sd.Insert("BitsPerComponent", *types.NewIndirectRef(11, 0))
+
+	im, err := pdfImage(xRefTable, sd, false, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if im.w != 1 || im.h != 1 || im.bpc != 8 {
+		t.Fatalf("got width=%d height=%d bpc=%d, want 1x1 at 8 bpc", im.w, im.h, im.bpc)
+	}
+}
+
 // TestWriteReaderLabelsCreateFailure verifies the corresponding behavior.
 func TestWriteReaderLabelsCreateFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "out.bin")
-	err := WriteReader(path, strings.NewReader("data"))
+	err := WriteReader(t.Context(), path, strings.NewReader("data"))
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected %v, got %v", os.ErrNotExist, err)
 	}
@@ -138,7 +198,7 @@ func TestWriteReaderRejectsNilReader(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			err := WriteReader(path, tt.reader)
+			err := WriteReader(t.Context(), path, tt.reader)
 			if !errors.Is(err, ErrMissingReader) {
 				t.Fatalf("expected %v, got %v", ErrMissingReader, err)
 			}
@@ -153,12 +213,40 @@ func TestWriteReaderRejectsNilReader(t *testing.T) {
 	}
 }
 
+// TestWriteReaderCancellationPreservesDestination verifies cancelled staged copies are not published.
+func TestWriteReaderCancellationPreservesDestination(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.bin")
+	if err := os.WriteFile(path, []byte("previous"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	err := WriteReader(ctx, path, &writeReaderCancelingReader{cancel: cancel})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	bb, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got, want := string(bb), "previous"; got != want {
+		t.Fatalf("existing output: got %q, want %q", got, want)
+	}
+	matches, globErr := filepath.Glob(filepath.Join(dir, ".out.bin.tmp-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary output remains: %v", matches)
+	}
+}
+
 // TestWriteReaderRemovesPartialOutputAfterCopyFailure verifies the corresponding behavior.
 func TestWriteReaderRemovesPartialOutputAfterCopyFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.bin")
 	wantErr := errors.New("copy failed")
 
-	err := WriteReader(path, &writeReaderErrorReader{err: wantErr})
+	err := WriteReader(t.Context(), path, &writeReaderErrorReader{err: wantErr})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
@@ -178,7 +266,7 @@ func TestWriteReaderPreservesExistingOutputAfterCopyFailure(t *testing.T) {
 	}
 	wantErr := errors.New("copy failed")
 
-	err := WriteReader(path, &writeReaderErrorReader{err: wantErr})
+	err := WriteReader(t.Context(), path, &writeReaderErrorReader{err: wantErr})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
@@ -342,7 +430,7 @@ func TestWriteReaderRenameFailurePreservesDestination(t *testing.T) {
 // TestWriteReaderSuccess verifies the corresponding behavior.
 func TestWriteReaderSuccess(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.bin")
-	if err := WriteReader(path, strings.NewReader("data")); err != nil {
+	if err := WriteReader(t.Context(), path, strings.NewReader("data")); err != nil {
 		t.Fatal(err)
 	}
 	bb, err := os.ReadFile(path)
@@ -367,7 +455,7 @@ func TestWriteReaderNewOutputUsesCreatePermissions(t *testing.T) {
 	}
 
 	path := filepath.Join(dir, "out.bin")
-	if err := WriteReader(path, strings.NewReader("data")); err != nil {
+	if err := WriteReader(t.Context(), path, strings.NewReader("data")); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
@@ -385,7 +473,7 @@ func TestWriteReaderReplacesExistingOutput(t *testing.T) {
 	if err := os.WriteFile(path, []byte("previous"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteReader(path, strings.NewReader("replacement")); err != nil {
+	if err := WriteReader(t.Context(), path, strings.NewReader("replacement")); err != nil {
 		t.Fatal(err)
 	}
 	bb, err := os.ReadFile(path)
@@ -408,7 +496,7 @@ func TestWriteReaderPreservesExistingOutputPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := WriteReader(path, strings.NewReader("replacement")); err != nil {
+	if err := WriteReader(t.Context(), path, strings.NewReader("replacement")); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.Stat(path)
@@ -463,7 +551,9 @@ func TestUnsupportedImageRenderingReturnsSentinel(t *testing.T) {
 			name: "DeviceN alternate type",
 			want: "DeviceN alternate colorspace type types.Integer",
 			fn: func() error {
-				_, _, err := renderDeviceN(im, types.Array{types.Name(model.DeviceNCS), types.Array{}, types.Integer(1)})
+				_, _, err := renderDeviceN(
+					xRefTable, im, types.Array{types.Name(model.DeviceNCS), types.Array{}, types.Integer(1)},
+				)
 				return err
 			},
 		},
@@ -471,7 +561,9 @@ func TestUnsupportedImageRenderingReturnsSentinel(t *testing.T) {
 			name: "DeviceN alternate colorspace",
 			want: "DeviceN alternate colorspace Lab",
 			fn: func() error {
-				_, _, err := renderDeviceN(im, types.Array{types.Name(model.DeviceNCS), types.Array{}, types.Name(model.LabCS)})
+				_, _, err := renderDeviceN(
+					xRefTable, im, types.Array{types.Name(model.DeviceNCS), types.Array{}, types.Name(model.LabCS)},
+				)
 				return err
 			},
 		},

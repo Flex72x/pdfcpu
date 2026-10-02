@@ -33,7 +33,7 @@ import (
 func stampTestWatermark(t *testing.T, update bool) *model.Watermark {
 	t.Helper()
 
-	wm, err := TextWatermark("draft", "", false, update, types.POINTS)
+	wm, err := TextWatermark(t.Context(), "draft", "", false, update, types.POINTS, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +42,99 @@ func stampTestWatermark(t *testing.T, update bool) *model.Watermark {
 
 func stampTestInputFile() string {
 	return filepath.Join("..", "samples", "create", "primitives", "textAndAlignment.pdf")
+}
+
+func TestWatermarkConstructorsRejectEmptyUserStrings(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		fn   func() error
+		want string
+	}{
+		{
+			name: "text watermark",
+			fn: func() error {
+				_, err := TextWatermark(t.Context(), "", "", false, false, types.POINTS, nil)
+				return err
+			},
+			want: "watermark text must not be empty",
+		},
+		{
+			name: "image stamp",
+			fn: func() error {
+				_, err := ImageWatermark(t.Context(), " \t", "", true, false, types.POINTS, nil)
+				return err
+			},
+			want: "stamp image filename must not be empty",
+		},
+		{
+			name: "PDF watermark",
+			fn: func() error {
+				_, err := PDFWatermark(t.Context(), "", "", false, false, types.POINTS, nil)
+				return err
+			},
+			want: "watermark PDF filename must not be empty",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.fn()
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected error containing %q, got %q", tt.want, err.Error())
+			}
+		})
+	}
+}
+
+func TestWatermarkReaderConstructorsRejectNil(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		fn   func() error
+		want string
+	}{
+		{
+			name: "image reader",
+			fn: func() error {
+				_, err := ImageWatermarkForReader(t.Context(), nil, "", false, false, types.POINTS)
+				return err
+			},
+			want: "missing image reader",
+		},
+		{
+			name: "PDF read seeker",
+			fn: func() error {
+				_, err := PDFWatermarkForReadSeeker(t.Context(), nil, 1, "", false, false, types.POINTS)
+				return err
+			},
+			want: "missing PDF read seeker",
+		},
+		{
+			name: "PDF multi read seeker",
+			fn: func() error {
+				_, err := PDFMultiWatermarkForReadSeeker(t.Context(), nil, 1, 1, "", false, false, types.POINTS)
+				return err
+			},
+			want: "missing PDF read seeker",
+		},
+		{
+			name: "PDF read seeker file helper",
+			fn: func() error {
+				return AddPDFWatermarksForReadSeekerFile(t.Context(), "", "", nil, false, nil, 1, "", nil)
+			},
+			want: "missing PDF read seeker",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.fn()
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if err.Error() != tt.want {
+				t.Fatalf("expected %q, got %q", tt.want, err.Error())
+			}
+		})
+	}
 }
 
 func TestStampMapErrorsPreserveSentinelsWithoutPanic(t *testing.T) {
@@ -54,14 +147,14 @@ func TestStampMapErrorsPreserveSentinelsWithoutPanic(t *testing.T) {
 		{
 			name: "missing watermark map",
 			fn: func() error {
-				return AddWatermarksMap(bytes.NewReader(nil), io.Discard, nil, nil)
+				return AddWatermarksMap(t.Context(), bytes.NewReader(nil), io.Discard, nil, nil)
 			},
 			wantErr: ErrMissingWatermarks,
 		},
 		{
 			name: "nil map watermark",
 			fn: func() error {
-				return AddWatermarksMap(bytes.NewReader(nil), io.Discard, map[int]*model.Watermark{1: nil}, nil)
+				return AddWatermarksMap(t.Context(), bytes.NewReader(nil), io.Discard, map[int]*model.Watermark{1: nil}, nil)
 			},
 			wantErr:     ErrMissingWatermarkConfiguration,
 			wantContext: "page 1",
@@ -69,7 +162,7 @@ func TestStampMapErrorsPreserveSentinelsWithoutPanic(t *testing.T) {
 		{
 			name: "empty watermark slice",
 			fn: func() error {
-				return AddWatermarksSliceMap(bytes.NewReader(nil), io.Discard, map[int][]*model.Watermark{2: nil}, nil)
+				return AddWatermarksSliceMap(t.Context(), bytes.NewReader(nil), io.Discard, map[int][]*model.Watermark{2: nil}, nil)
 			},
 			wantErr:     ErrMissingWatermarks,
 			wantContext: "page 2",
@@ -77,7 +170,7 @@ func TestStampMapErrorsPreserveSentinelsWithoutPanic(t *testing.T) {
 		{
 			name: "nil slice watermark",
 			fn: func() error {
-				return AddWatermarksSliceMap(bytes.NewReader(nil), io.Discard, map[int][]*model.Watermark{3: {nil}}, nil)
+				return AddWatermarksSliceMap(t.Context(), bytes.NewReader(nil), io.Discard, map[int][]*model.Watermark{3: {nil}}, nil)
 			},
 			wantErr:     ErrMissingWatermarkConfiguration,
 			wantContext: "page 3, watermark 0",
@@ -135,35 +228,35 @@ func TestStampReaderEntryPointsPreserveMissingIO(t *testing.T) {
 		{
 			name: "map reader",
 			fn: func() error {
-				return AddWatermarksMap(nil, io.Discard, map[int]*model.Watermark{1: wm}, nil)
+				return AddWatermarksMap(t.Context(), nil, io.Discard, map[int]*model.Watermark{1: wm}, nil)
 			},
 			wantErr: ErrMissingPDFReadSeeker,
 		},
 		{
 			name: "slice map writer",
 			fn: func() error {
-				return AddWatermarksSliceMap(bytes.NewReader(nil), nil, map[int][]*model.Watermark{1: {wm}}, nil)
+				return AddWatermarksSliceMap(t.Context(), bytes.NewReader(nil), nil, map[int][]*model.Watermark{1: {wm}}, nil)
 			},
 			wantErr: ErrMissingPDFWriter,
 		},
 		{
 			name: "add reader",
 			fn: func() error {
-				return AddWatermarks(nil, io.Discard, nil, wm, nil)
+				return AddWatermarks(t.Context(), nil, io.Discard, nil, wm, nil)
 			},
 			wantErr: ErrMissingPDFReadSeeker,
 		},
 		{
 			name: "remove writer",
 			fn: func() error {
-				return RemoveWatermarks(bytes.NewReader(nil), nil, nil, nil)
+				return RemoveWatermarks(t.Context(), bytes.NewReader(nil), nil, nil, nil)
 			},
 			wantErr: ErrMissingPDFWriter,
 		},
 		{
 			name: "detect reader",
 			fn: func() error {
-				_, err := HasWatermarks(nil, nil)
+				_, err := HasWatermarks(t.Context(), nil, nil)
 				return err
 			},
 			wantErr: ErrMissingPDFReadSeeker,
@@ -189,35 +282,35 @@ func TestStampReadErrorsIncludePhaseContext(t *testing.T) {
 		{
 			name: "watermark map",
 			fn: func() error {
-				return AddWatermarksMap(bytes.NewReader(nil), io.Discard, map[int]*model.Watermark{1: wm}, nil)
+				return AddWatermarksMap(t.Context(), bytes.NewReader(nil), io.Discard, map[int]*model.Watermark{1: wm}, nil)
 			},
 			want: "add watermarks: prepare PDF context",
 		},
 		{
 			name: "watermark slice map",
 			fn: func() error {
-				return AddWatermarksSliceMap(bytes.NewReader(nil), io.Discard, map[int][]*model.Watermark{1: {wm}}, nil)
+				return AddWatermarksSliceMap(t.Context(), bytes.NewReader(nil), io.Discard, map[int][]*model.Watermark{1: {wm}}, nil)
 			},
 			want: "add watermarks: prepare PDF context",
 		},
 		{
 			name: "add watermarks",
 			fn: func() error {
-				return AddWatermarks(bytes.NewReader(nil), io.Discard, nil, wm, nil)
+				return AddWatermarks(t.Context(), bytes.NewReader(nil), io.Discard, nil, wm, nil)
 			},
 			want: "add watermarks: prepare PDF context",
 		},
 		{
 			name: "remove watermarks",
 			fn: func() error {
-				return RemoveWatermarks(bytes.NewReader(nil), io.Discard, nil, nil)
+				return RemoveWatermarks(t.Context(), bytes.NewReader(nil), io.Discard, nil, nil)
 			},
 			want: "remove watermarks: prepare PDF context",
 		},
 		{
 			name: "detect watermarks",
 			fn: func() error {
-				_, err := HasWatermarks(bytes.NewReader(nil), nil)
+				_, err := HasWatermarks(t.Context(), bytes.NewReader(nil), nil)
 				return err
 			},
 			want: "detect watermarks: prepare PDF context",
@@ -241,7 +334,7 @@ func TestStampReadErrorsIncludePhaseContext(t *testing.T) {
 }
 
 func TestUpdateWatermarkReadErrorUsesUpdateOperation(t *testing.T) {
-	err := AddWatermarks(bytes.NewReader(nil), io.Discard, nil, stampTestWatermark(t, true), nil)
+	err := AddWatermarks(t.Context(), bytes.NewReader(nil), io.Discard, nil, stampTestWatermark(t, true), nil)
 	if !errors.Is(err, pdfcpu.ErrEmptyInput) {
 		t.Fatalf("expected %v, got %v", pdfcpu.ErrEmptyInput, err)
 	}
@@ -254,7 +347,7 @@ func TestUpdateWatermarkReadErrorUsesUpdateOperation(t *testing.T) {
 }
 
 func TestWatermarkContextRejectsMissingXRefTable(t *testing.T) {
-	err := WatermarkContext(&model.Context{}, nil, stampTestWatermark(t, false))
+	err := WatermarkContext(t.Context(), &model.Context{}, nil, stampTestWatermark(t, false))
 	if !errors.Is(err, ErrMissingXRefTable) {
 		t.Fatalf("expected %v, got %v", ErrMissingXRefTable, err)
 	}
@@ -285,14 +378,14 @@ func TestStampPageSelectionErrorsIncludePhaseContext(t *testing.T) {
 		{
 			name: "add watermarks",
 			fn: func() error {
-				return AddWatermarks(openAPITestPDF(t, stampTestInputFile()), io.Discard, []string{"foo"}, wm, nil)
+				return AddWatermarks(t.Context(), openAPITestPDF(t, stampTestInputFile()), io.Discard, []string{"foo"}, wm, nil)
 			},
 			want: "add watermarks: parse page selection",
 		},
 		{
 			name: "remove watermarks",
 			fn: func() error {
-				return RemoveWatermarks(openAPITestPDF(t, stampTestInputFile()), io.Discard, []string{"foo"}, nil)
+				return RemoveWatermarks(t.Context(), openAPITestPDF(t, stampTestInputFile()), io.Discard, []string{"foo"}, nil)
 			},
 			want: "remove watermarks: parse page selection",
 		},
@@ -317,6 +410,7 @@ func TestStampPageSelectionErrorsIncludePhaseContext(t *testing.T) {
 func TestAddWatermarksWriteErrorIncludesPhaseContext(t *testing.T) {
 	wantErr := errors.New("stamp write failed")
 	err := AddWatermarks(
+		t.Context(),
 		openAPITestPDF(t, stampTestInputFile()),
 		failingWriter{err: wantErr},
 		[]string{"1"},
@@ -341,6 +435,7 @@ func TestStampMapWriteErrorsIncludePhaseContext(t *testing.T) {
 			name: "watermark map",
 			fn: func() error {
 				return AddWatermarksMap(
+					t.Context(),
 					openAPITestPDF(t, stampTestInputFile()),
 					failingWriter{err: wantErr},
 					map[int]*model.Watermark{1: stampTestWatermark(t, false)},
@@ -352,6 +447,7 @@ func TestStampMapWriteErrorsIncludePhaseContext(t *testing.T) {
 			name: "watermark slice map",
 			fn: func() error {
 				return AddWatermarksSliceMap(
+					t.Context(),
 					openAPITestPDF(t, stampTestInputFile()),
 					failingWriter{err: wantErr},
 					map[int][]*model.Watermark{1: {stampTestWatermark(t, false)}},
@@ -375,7 +471,7 @@ func TestStampMapWriteErrorsIncludePhaseContext(t *testing.T) {
 }
 
 func TestStampApplyErrorsIncludeOperationContext(t *testing.T) {
-	err := RemoveWatermarks(openAPITestPDF(t, stampTestInputFile()), io.Discard, nil, nil)
+	err := RemoveWatermarks(t.Context(), openAPITestPDF(t, stampTestInputFile()), io.Discard, nil, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -387,6 +483,7 @@ func TestStampApplyErrorsIncludeOperationContext(t *testing.T) {
 func TestUpdateWatermarksWriteErrorUsesUpdateOperation(t *testing.T) {
 	wantErr := errors.New("update watermark write failed")
 	err := AddWatermarks(
+		t.Context(),
 		openAPITestPDF(t, stampTestInputFile()),
 		failingWriter{err: wantErr},
 		[]string{"1"},
@@ -408,19 +505,21 @@ func TestStampFileEntryPointsPreserveMissingInput(t *testing.T) {
 		name string
 		fn   func() error
 	}{
-		{name: "watermark map", fn: func() error { return AddWatermarksMapFile("", "", nil, nil) }},
-		{name: "watermark slice map", fn: func() error { return AddWatermarksSliceMapFile("", "", nil, nil) }},
-		{name: "add watermarks", fn: func() error { return AddWatermarksFile("", "", nil, wm, nil) }},
-		{name: "remove watermarks", fn: func() error { return RemoveWatermarksFile("", "", nil, nil) }},
-		{name: "detect watermarks", fn: func() error { _, err := HasWatermarksFile("", nil); return err }},
-		{name: "add text", fn: func() error { return AddTextWatermarksFile("", "", nil, false, "draft", "", nil) }},
-		{name: "add image", fn: func() error { return AddImageWatermarksFile("", "", nil, false, "image.png", "", nil) }},
-		{name: "add image reader", fn: func() error { return AddImageWatermarksForReaderFile("", "", nil, false, reader, "", nil) }},
-		{name: "add PDF", fn: func() error { return AddPDFWatermarksFile("", "", nil, false, "stamp.pdf", "", nil) }},
-		{name: "add PDF reader", fn: func() error { return AddPDFWatermarksForReadSeekerFile("", "", nil, false, reader, 1, "", nil) }},
-		{name: "update text", fn: func() error { return UpdateTextWatermarksFile("", "", nil, false, "draft", "", nil) }},
-		{name: "update image", fn: func() error { return UpdateImageWatermarksFile("", "", nil, false, "image.png", "", nil) }},
-		{name: "update PDF", fn: func() error { return UpdatePDFWatermarksFile("", "", nil, false, "stamp.pdf", "", nil) }},
+		{name: "watermark map", fn: func() error { return AddWatermarksMapFile(t.Context(), "", "", nil, nil) }},
+		{name: "watermark slice map", fn: func() error { return AddWatermarksSliceMapFile(t.Context(), "", "", nil, nil) }},
+		{name: "add watermarks", fn: func() error { return AddWatermarksFile(t.Context(), "", "", nil, wm, nil) }},
+		{name: "remove watermarks", fn: func() error { return RemoveWatermarksFile(t.Context(), "", "", nil, nil) }},
+		{name: "detect watermarks", fn: func() error { _, err := HasWatermarksFile(t.Context(), "", nil); return err }},
+		{name: "add text", fn: func() error { return AddTextWatermarksFile(t.Context(), "", "", nil, false, "draft", "", nil) }},
+		{name: "add image", fn: func() error { return AddImageWatermarksFile(t.Context(), "", "", nil, false, "image.png", "", nil) }},
+		{name: "add image reader", fn: func() error { return AddImageWatermarksForReaderFile(t.Context(), "", "", nil, false, reader, "", nil) }},
+		{name: "add PDF", fn: func() error { return AddPDFWatermarksFile(t.Context(), "", "", nil, false, "stamp.pdf", "", nil) }},
+		{name: "add PDF reader", fn: func() error {
+			return AddPDFWatermarksForReadSeekerFile(t.Context(), "", "", nil, false, reader, 1, "", nil)
+		}},
+		{name: "update text", fn: func() error { return UpdateTextWatermarksFile(t.Context(), "", "", nil, false, "draft", "", nil) }},
+		{name: "update image", fn: func() error { return UpdateImageWatermarksFile(t.Context(), "", "", nil, false, "image.png", "", nil) }},
+		{name: "update PDF", fn: func() error { return UpdatePDFWatermarksFile(t.Context(), "", "", nil, false, "stamp.pdf", "", nil) }},
 	}
 
 	for _, tt := range tests {
@@ -439,11 +538,11 @@ func TestStampFileOpenErrorsIncludeOperationContext(t *testing.T) {
 		fn   func() error
 		want string
 	}{
-		{name: "watermark map", fn: func() error { return AddWatermarksMapFile("missing.pdf", "", nil, nil) }, want: "add watermarks: open input missing.pdf"},
-		{name: "watermark slice map", fn: func() error { return AddWatermarksSliceMapFile("missing.pdf", "", nil, nil) }, want: "add watermarks: open input missing.pdf"},
-		{name: "add watermarks", fn: func() error { return AddWatermarksFile("missing.pdf", "", nil, wm, nil) }, want: "add watermarks: open input missing.pdf"},
-		{name: "remove watermarks", fn: func() error { return RemoveWatermarksFile("missing.pdf", "", nil, nil) }, want: "remove watermarks: open input missing.pdf"},
-		{name: "detect watermarks", fn: func() error { _, err := HasWatermarksFile("missing.pdf", nil); return err }, want: "detect watermarks: open input missing.pdf"},
+		{name: "watermark map", fn: func() error { return AddWatermarksMapFile(t.Context(), "missing.pdf", "", nil, nil) }, want: "add watermarks: open input missing.pdf"},
+		{name: "watermark slice map", fn: func() error { return AddWatermarksSliceMapFile(t.Context(), "missing.pdf", "", nil, nil) }, want: "add watermarks: open input missing.pdf"},
+		{name: "add watermarks", fn: func() error { return AddWatermarksFile(t.Context(), "missing.pdf", "", nil, wm, nil) }, want: "add watermarks: open input missing.pdf"},
+		{name: "remove watermarks", fn: func() error { return RemoveWatermarksFile(t.Context(), "missing.pdf", "", nil, nil) }, want: "remove watermarks: open input missing.pdf"},
+		{name: "detect watermarks", fn: func() error { _, err := HasWatermarksFile(t.Context(), "missing.pdf", nil); return err }, want: "detect watermarks: open input missing.pdf"},
 	}
 
 	for _, tt := range tests {
@@ -516,7 +615,7 @@ func TestCloseStampFilesErrorsIncludeOperationContext(t *testing.T) {
 }
 
 func TestWatermarkConstructorErrorsIncludePhaseContext(t *testing.T) {
-	_, err := TextWatermark("", "", false, false, types.POINTS)
+	_, err := TextWatermark(t.Context(), "", "", false, false, types.POINTS, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -527,13 +626,13 @@ func TestWatermarkConstructorErrorsIncludePhaseContext(t *testing.T) {
 		t.Fatalf("expected validation detail in %q", err.Error())
 	}
 
-	if _, err = ImageWatermarkForReader(nil, "", false, false, types.POINTS); !errors.Is(err, ErrMissingImageReader) {
+	if _, err = ImageWatermarkForReader(t.Context(), nil, "", false, false, types.POINTS); !errors.Is(err, ErrMissingImageReader) {
 		t.Fatalf("expected %v, got %v", ErrMissingImageReader, err)
 	}
 }
 
 func TestUpdateWatermarkFileErrorsUseUpdateOperation(t *testing.T) {
-	err := AddWatermarksFile("missing.pdf", "", nil, stampTestWatermark(t, true), nil)
+	err := AddWatermarksFile(t.Context(), "missing.pdf", "", nil, stampTestWatermark(t, true), nil)
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected %v, got %v", os.ErrNotExist, err)
 	}

@@ -40,10 +40,10 @@ func testImportImages(t *testing.T, msg string, imgFiles []string, outFile, impC
 			t.Fatalf("%s %s: %v\n", msg, outFile, err)
 		}
 	}
-	if err := api.ImportImagesFile(imgFiles, outFile, imp, nil); err != nil {
+	if err := api.ImportImagesFile(t.Context(), imgFiles, outFile, imp, nil); err != nil {
 		t.Fatalf("%s %s: %v\n", msg, outFile, err)
 	}
-	if err := api.ValidateFile(outFile, nil); err != nil {
+	if err := api.ValidateFile(t.Context(), outFile, nil, nil); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
 }
@@ -57,6 +57,9 @@ func TestImportImages(t *testing.T) {
 
 	testFile2 := filepath.Join(outDir, "Full.pdf")
 	os.Remove(testFile2)
+
+	testFile3 := filepath.Join(outDir, "MultiPageTIFF.pdf")
+	os.Remove(testFile3)
 
 	for _, tt := range []struct {
 		msg      string
@@ -88,6 +91,12 @@ func TestImportImages(t *testing.T) {
 			testFile1,
 			"f:A4, pos:c, sc:1, bgcol:#beded9"},
 
+		// Render each image of a multi-page TIFF on its own page.
+		{"TestMultiPageTIFF",
+			[]string{filepath.Join(resDir, "multipage.tif")},
+			testFile3,
+			"pos:full"},
+
 		// Page dimensions match image dimensions.
 		{"TestFull",
 			imageFileNames(t, resDir),
@@ -95,6 +104,14 @@ func TestImportImages(t *testing.T) {
 			"pos:full"},
 	} {
 		testImportImages(t, tt.msg, tt.imgFiles, tt.outFile, tt.impConf)
+	}
+
+	pageCount, err := api.PageCountFile(t.Context(), testFile3)
+	if err != nil {
+		t.Fatalf("TestMultiPageTIFF: %v\n", err)
+	}
+	if pageCount != 2 {
+		t.Fatalf("TestMultiPageTIFF: want 2 pages, got %d\n", pageCount)
 	}
 }
 
@@ -113,7 +130,7 @@ func TestMemBasedWriterPanic(t *testing.T) {
 
 	outBuf := &bytes.Buffer{}
 
-	if err := api.ImportImages(nil, outBuf, rr, nil, nil); err != nil {
+	if err := api.ImportImages(t.Context(), nil, outBuf, rr, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }

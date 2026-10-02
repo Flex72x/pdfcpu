@@ -55,13 +55,14 @@ func TestEnsureCollectionWrapsCatalogAccess(t *testing.T) {
 	}
 }
 
+// TestEnsureCollectionGuardsNilCatalog verifies unresolved catalogs retain portfolio creation error context.
 func TestEnsureCollectionGuardsNilCatalog(t *testing.T) {
 	xRefTable := portfolioXRefTable()
 	xRefTable.Root = types.NewIndirectRef(42, 0)
 
 	err := xRefTable.EnsureCollection()
 
-	if err == nil || !strings.Contains(err.Error(), "portfolio: catalog: missing dictionary") {
+	if err == nil || !strings.Contains(err.Error(), "portfolio: catalog: missing root dict") {
 		t.Fatalf("expected missing portfolio catalog dictionary, got %v", err)
 	}
 }
@@ -104,18 +105,19 @@ func TestRemoveCollectionWrapsCatalogAccess(t *testing.T) {
 	xRefTable.Root = types.NewIndirectRef(1, 0)
 	xRefTable.Table[1] = NewXRefTableEntryGen0(failingRemovalObject(wantErr))
 
-	err := xRefTable.RemoveCollection()
+	err := xRefTable.RemoveCollection(t.Context())
 
 	requireRemovalError(t, err, wantErr, "portfolio: catalog: catalog decode failed")
 }
 
+// TestRemoveCollectionGuardsNilCatalog verifies unresolved catalogs retain portfolio removal error context.
 func TestRemoveCollectionGuardsNilCatalog(t *testing.T) {
 	xRefTable := portfolioXRefTable()
 	xRefTable.Root = types.NewIndirectRef(42, 0)
 
-	err := xRefTable.RemoveCollection()
+	err := xRefTable.RemoveCollection(t.Context())
 
-	if err == nil || !strings.Contains(err.Error(), "portfolio: catalog: missing dictionary") {
+	if err == nil || !strings.Contains(err.Error(), "portfolio: catalog: missing root dict") {
 		t.Fatalf("expected missing portfolio catalog dictionary, got %v", err)
 	}
 }
@@ -128,7 +130,7 @@ func TestRemoveCollectionWrapsCollectionEntryDeletion(t *testing.T) {
 	}
 	xRefTable.Table[1] = NewXRefTableEntryGen0(failingRemovalObject(wantErr))
 
-	err := xRefTable.RemoveCollection()
+	err := xRefTable.RemoveCollection(t.Context())
 
 	requireRemovalError(
 		t,

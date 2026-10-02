@@ -17,6 +17,7 @@ limitations under the License.
 package test
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -461,7 +462,7 @@ var langSamples = []sample{
 	{"Roboto-Regular", "Vietnamese", sampleVietnamese, false},
 }
 
-func renderArticle(xRefTable *model.XRefTable, p model.Page, row, col, lang int) {
+func renderArticle(c context.Context, xRefTable *model.XRefTable, p model.Page, row, col, lang int) {
 	mediaBox := p.MediaBox
 	w := mediaBox.Width() / 6
 	h := mediaBox.Height() / 5
@@ -500,7 +501,7 @@ func renderArticle(xRefTable *model.XRefTable, p model.Page, row, col, lang int)
 		HairCross:      false,
 	}
 
-	model.WriteColumnAnchored(xRefTable, buf, mediaBox, region, td, types.TopLeft, 0)
+	model.WriteColumnAnchored(c, xRefTable, buf, mediaBox, region, td, types.TopLeft, 0)
 
 	fontName = sample.fontName
 	k = p.Fm.EnsureKey(fontName)
@@ -534,17 +535,17 @@ func renderArticle(xRefTable *model.XRefTable, p model.Page, row, col, lang int)
 	}
 
 	if sample.lang == "Japanese" {
-		model.WriteColumn(xRefTable, buf, mediaBox, region, td, mediaBox.Width()*.9)
+		model.WriteColumn(c, xRefTable, buf, mediaBox, region, td, mediaBox.Width()*.9)
 		return
 	}
 
 	if sample.lang == "Thai" {
 		td.HAlign = types.AlignLeft
-		model.WriteColumn(xRefTable, buf, mediaBox, region, td, mediaBox.Width()*.9)
+		model.WriteColumn(c, xRefTable, buf, mediaBox, region, td, mediaBox.Width()*.9)
 		return
 	}
 
-	model.WriteMultiLine(xRefTable, buf, mediaBox, region, td)
+	model.WriteMultiLine(c, xRefTable, buf, mediaBox, region, td)
 }
 
 // TestUserFonts verifies user fonts.
@@ -555,7 +556,7 @@ func TestUserFonts(t *testing.T) {
 	mediaBox := types.RectForDim(w, h)
 	p := model.NewPageWithBg(mediaBox, color.NewSimpleColor(0xbeded9))
 
-	xRefTable, err := pdfcpu.CreateDemoXRef()
+	xRefTable, err := pdfcpu.CreateXRefTableWithRootDict()
 	if err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
@@ -563,7 +564,7 @@ func TestUserFonts(t *testing.T) {
 	lang := 0
 	for row := 0; row < 5; row++ {
 		for col := 0; col < 6; col++ {
-			renderArticle(xRefTable, p, row, col, lang)
+			renderArticle(t.Context(), xRefTable, p, row, col, lang)
 			lang++
 		}
 	}
@@ -572,7 +573,7 @@ func TestUserFonts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
-	if err = pdfcpu.AddPageTreeWithSamplePage(xRefTable, rootDict, p); err != nil {
+	if err = addPageTreeWithPage(t.Context(), xRefTable, rootDict, p); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
 	outDir := filepath.Join("..", "..", "samples", "basic")

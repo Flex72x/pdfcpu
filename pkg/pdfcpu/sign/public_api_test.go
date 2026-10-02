@@ -17,6 +17,7 @@ limitations under the License.
 package sign_test
 
 import (
+	"context"
 	"crypto/x509"
 	"go/ast"
 	"go/parser"
@@ -36,6 +37,7 @@ import (
 )
 
 type exportedValidationFunc func(
+	context.Context,
 	io.ReaderAt,
 	types.Dict,
 	bool,
@@ -48,24 +50,36 @@ type exportedValidationFunc func(
 ) error
 
 type domainValidationFunc func(
+	context.Context,
 	io.ReaderAt,
 	*model.Context,
 	bool,
 ) ([]*model.SignatureValidationResult, error)
 
+type domainValidationWithPoolFunc func(
+	context.Context,
+	io.ReaderAt,
+	*model.Context,
+	bool,
+	*x509.CertPool,
+) ([]*model.SignatureValidationResult, error)
+
 type apiFileValidationFunc func(
+	context.Context,
 	string,
 	bool,
 	*model.Configuration,
 ) ([]*model.SignatureValidationResult, error)
 
 type apiRawValidationFunc func(
+	context.Context,
 	api.ReadSeekerAt,
 	bool,
 	*model.Configuration,
 ) ([]*model.SignatureValidationResult, error)
 
 type apiPresentationFunc func(
+	context.Context,
 	string,
 	bool,
 	bool,
@@ -73,13 +87,14 @@ type apiPresentationFunc func(
 ) ([]string, error)
 
 var (
-	_ exportedValidationFunc = sign.ValidatePKCS7Signatures
-	_ exportedValidationFunc = sign.ValidateDTS
-	_ exportedValidationFunc = sign.ValidateX509RSASHA1Signature
-	_ domainValidationFunc   = pdfcpu.ValidateSignatures
-	_ apiFileValidationFunc  = api.ValidateSignatures
-	_ apiRawValidationFunc   = api.ValidateSignaturesRaw
-	_ apiPresentationFunc    = api.ValidateSignaturesFile
+	_ exportedValidationFunc       = sign.ValidatePKCS7Signatures
+	_ exportedValidationFunc       = sign.ValidateDTS
+	_ exportedValidationFunc       = sign.ValidateX509RSASHA1Signature
+	_ domainValidationFunc         = pdfcpu.ValidateSignatures
+	_ domainValidationWithPoolFunc = pdfcpu.ValidateSignaturesWithCertificatePool
+	_ apiFileValidationFunc        = api.ValidateSignatures
+	_ apiRawValidationFunc         = api.ValidateSignaturesRaw
+	_ apiPresentationFunc          = api.ValidateSignaturesFile
 )
 
 // TestPublicSignatureAPIRejectsServiceInjection prevents the public API,

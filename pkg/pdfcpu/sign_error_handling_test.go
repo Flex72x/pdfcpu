@@ -114,11 +114,14 @@ func useTestCertificatePool(t *testing.T, pool *x509.CertPool) {
 
 	trustedCertificatePool.Lock()
 	oldPool := trustedCertificatePool.pool
+	oldModelPool := model.UserCertPool
 	trustedCertificatePool.pool = pool
+	model.UserCertPool = pool
 	trustedCertificatePool.Unlock()
 	t.Cleanup(func() {
 		trustedCertificatePool.Lock()
 		trustedCertificatePool.pool = oldPool
+		model.UserCertPool = oldModelPool
 		trustedCertificatePool.Unlock()
 	})
 }
@@ -152,14 +155,14 @@ func TestSignatureValidationFatalVersusEvidenceContract(t *testing.T) {
 					7: model.NewXRefTableEntryGen0(lazy),
 				},
 				Signatures: map[int]map[int]model.Signature{
-					0: {
+					1: {
 						7: {ObjNr: 7},
 					},
 				},
 			},
 		}
 
-		results, err := ValidateSignatures(bytes.NewReader(nil), ctx, false)
+		results, err := ValidateSignatures(t.Context(), bytes.NewReader(nil), ctx, false)
 		if !errors.Is(err, cause) {
 			t.Fatalf("expected fatal construction cause %v, got results %v and error %v", cause, results, err)
 		}
@@ -180,14 +183,14 @@ func TestSignatureValidationFatalVersusEvidenceContract(t *testing.T) {
 					9: model.NewXRefTableEntryGen0(types.Dict{}),
 				},
 				Signatures: map[int]map[int]model.Signature{
-					0: {
+					1: {
 						7: {ObjNr: 7},
 					},
 				},
 			},
 		}
 
-		results, err := ValidateSignatures(bytes.NewReader(nil), ctx, false)
+		results, err := ValidateSignatures(t.Context(), bytes.NewReader(nil), ctx, false)
 		if err != nil {
 			t.Fatalf("expected reportable evidence, got fatal error %v", err)
 		}
@@ -205,7 +208,7 @@ func TestSignatureValidationFatalVersusEvidenceContract(t *testing.T) {
 func TestValidateSignaturesOrdersSameIncrementByObjectNumber(t *testing.T) {
 	ctx := sameIncrementSignatureContext()
 	for i := 0; i < 32; i++ {
-		results, err := ValidateSignatures(bytes.NewReader(nil), ctx, true)
+		results, err := ValidateSignatures(t.Context(), bytes.NewReader(nil), ctx, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -218,7 +221,7 @@ func TestValidateSignaturesOrdersSameIncrementByObjectNumber(t *testing.T) {
 // TestValidateSignaturesSelectsDeterministicAuthoritativeSignature verifies the
 // lowest object number is consistently selected first within one increment.
 func TestValidateSignaturesSelectsDeterministicAuthoritativeSignature(t *testing.T) {
-	results, err := ValidateSignatures(bytes.NewReader(nil), sameIncrementSignatureContext(), false)
+	results, err := ValidateSignatures(t.Context(), bytes.NewReader(nil), sameIncrementSignatureContext(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +246,7 @@ func sameIncrementSignatureContext() *model.Context {
 				17: model.NewXRefTableEntryGen0(sigDict()),
 			},
 			Signatures: map[int]map[int]model.Signature{
-				0: {
+				1: {
 					7: {Type: model.SigTypeForm, ObjNr: 7, Signed: true},
 					5: {Type: model.SigTypeForm, ObjNr: 5, Signed: true},
 				},
@@ -299,6 +302,7 @@ func TestSignatureResultFieldsAndKindsCharacterization(t *testing.T) {
 		},
 	}
 	ordinary, err := validateSignature(
+		t.Context(),
 		model.Signature{
 			Type:    model.SigTypeForm,
 			Visible: true,
@@ -316,6 +320,7 @@ func TestSignatureResultFieldsAndKindsCharacterization(t *testing.T) {
 		t.Fatalf("ordinary signature: %v", err)
 	}
 	usageRights, err := validateURSignature(
+		t.Context(),
 		types.Dict{},
 		0,
 		ctx,
@@ -376,7 +381,7 @@ func TestUsageRightsUsesDirectSignatureEvidencePath(t *testing.T) {
 		XRefTable:     &model.XRefTable{},
 	}
 
-	usageRights, err := validateURSignature(fixture.sigDict, 0, ctx, bytes.NewReader(fixture.data))
+	usageRights, err := validateURSignature(t.Context(), fixture.sigDict, 0, ctx, bytes.NewReader(fixture.data))
 	if err != nil {
 		t.Fatalf("usage-rights signature: %v", err)
 	}
@@ -388,6 +393,7 @@ func TestUsageRightsUsesDirectSignatureEvidencePath(t *testing.T) {
 	}
 	handler := sigHandler("adbe.x509.rsa_sha1")
 	if err := handler(
+		t.Context(),
 		bytes.NewReader(fixture.data),
 		fixture.sigDict,
 		false,
@@ -430,9 +436,9 @@ func TestUsageRightsRevisionReportingUsesCachedIncrement(t *testing.T) {
 		XRefTable:     &model.XRefTable{},
 	}
 	ctx.URSignature = fixture.sigDict
-	ctx.URSignatureIncrement = 1
+	ctx.URSignatureIncrement = 2
 
-	results, err := ValidateSignatures(bytes.NewReader(file), ctx, true)
+	results, err := ValidateSignatures(t.Context(), bytes.NewReader(file), ctx, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,6 +466,7 @@ func TestUsageRightsCurrentRevisionRejectsUnsignedSuffix(t *testing.T) {
 	}
 
 	result, err := validateURSignature(
+		t.Context(),
 		fixture.sigDict,
 		0,
 		ctx,
@@ -489,6 +496,7 @@ func TestUsageRightsContentsGapIsEvidence(t *testing.T) {
 	}
 
 	result, err := validateURSignature(
+		t.Context(),
 		fixture.sigDict,
 		0,
 		ctx,
@@ -522,6 +530,7 @@ func TestUsageRightsByteRangeParsingIsEvidence(t *testing.T) {
 	}
 
 	result, err := validateURSignature(
+		t.Context(),
 		sigDict,
 		0,
 		ctx,
@@ -550,6 +559,7 @@ func TestUsageRightsFatalPositionalReadPreservesCause(t *testing.T) {
 	}
 
 	_, err := validateURSignature(
+		t.Context(),
 		fixture.sigDict,
 		0,
 		ctx,
@@ -628,6 +638,7 @@ func TestSignedRevisionBoundaryEvidence(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := signedRevisionBoundaryContext(int64(len(file)), tt.subFilter)
 			result, err := validateSignature(
+				t.Context(),
 				model.Signature{Type: tt.sigType, ObjNr: 7},
 				ctx,
 				bytes.NewReader([]byte(file)),
@@ -683,6 +694,7 @@ func TestHistoricalSignatureReportingPreservesCryptographicEvidence(t *testing.T
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := historicalSignatureContext(fixture)
 			result, err := validateSignature(
+				t.Context(),
 				model.Signature{
 					Type:   model.SigTypeForm,
 					ObjNr:  7,
@@ -830,14 +842,14 @@ func TestValidateSignaturesAddsSignatureObjectContext(t *testing.T) {
 				7: model.NewXRefTableEntryGen0(lazy),
 			},
 			Signatures: map[int]map[int]model.Signature{
-				0: {
+				1: {
 					7: {ObjNr: 7},
 				},
 			},
 		},
 	}
 
-	_, err := ValidateSignatures(bytes.NewReader(nil), ctx, false)
+	_, err := ValidateSignatures(t.Context(), bytes.NewReader(nil), ctx, false)
 	if !errors.Is(err, cause) {
 		t.Fatalf("expected %v, got %v", cause, err)
 	}
@@ -866,14 +878,14 @@ func TestValidateSignaturesAddsSignatureDictionaryObjectContext(t *testing.T) {
 				9: model.NewXRefTableEntryGen0(lazy),
 			},
 			Signatures: map[int]map[int]model.Signature{
-				0: {
+				1: {
 					7: {ObjNr: 7},
 				},
 			},
 		},
 	}
 
-	_, err := ValidateSignatures(bytes.NewReader(nil), ctx, false)
+	_, err := ValidateSignatures(t.Context(), bytes.NewReader(nil), ctx, false)
 	if !errors.Is(err, cause) {
 		t.Fatalf("expected %v, got %v", cause, err)
 	}
@@ -894,7 +906,7 @@ func TestValidateSignaturesReportsUsageRightsDetailEvidence(t *testing.T) {
 		},
 	}
 
-	results, err := ValidateSignatures(bytes.NewReader(nil), ctx, false)
+	results, err := ValidateSignatures(t.Context(), bytes.NewReader(nil), ctx, false)
 	if err != nil {
 		t.Fatalf("expected signature detail evidence, got fatal error %v", err)
 	}
@@ -944,6 +956,7 @@ func TestValidateURSignatureNormalizesSubFilterProblems(t *testing.T) {
 
 	for _, tt := range tests {
 		result, err := validateURSignature(
+			t.Context(),
 			tt.sigDict,
 			0,
 			ctx,
@@ -1010,6 +1023,7 @@ func TestSubFilterEvidenceIsConsistentAcrossSignatureKinds(t *testing.T) {
 			cause := errors.New("SubFilter evidence attempted a positional read")
 			ordinaryCtx := signatureSubFilterContext(tt.sigDict)
 			ordinary, err := validateSignature(
+				t.Context(),
 				model.Signature{
 					Type:   model.SigTypeForm,
 					Signed: true,
@@ -1026,6 +1040,7 @@ func TestSubFilterEvidenceIsConsistentAcrossSignatureKinds(t *testing.T) {
 			}
 
 			usageRights, err := validateURSignature(
+				t.Context(),
 				tt.sigDict,
 				0,
 				&model.Context{XRefTable: &model.XRefTable{}},
@@ -1069,6 +1084,7 @@ func signatureSubFilterContext(sigDict types.Dict) *model.Context {
 func TestFieldDetailsReportsEvidence(t *testing.T) {
 	result := model.SignatureValidationResult{}
 	fieldDetails(
+		signatureSubFilterContext(types.Dict{}),
 		types.Dict{"T": types.StringLiteral(string([]byte{0xFE, 0xFF, 0xD8, 0x00}))},
 		&result,
 	)
@@ -1199,7 +1215,7 @@ func TestValidateSignatureContinuesAfterReferenceEvidence(t *testing.T) {
 		},
 	}
 
-	result, err := validateSignature(model.Signature{ObjNr: 7}, ctx, bytes.NewReader(nil), true, false, 0)
+	result, err := validateSignature(t.Context(), model.Signature{ObjNr: 7}, ctx, bytes.NewReader(nil), true, false, 0)
 	if err != nil {
 		t.Fatalf("expected evidence, got fatal error %v", err)
 	}

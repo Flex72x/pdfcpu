@@ -65,7 +65,7 @@ func resizeTestRectangle(t *testing.T, ctx *model.Context, o types.Object) *type
 // TestResizeBlankPageUpdatesGeometryAndAnnotations verifies blank pages are fully resized.
 func TestResizeBlankPageUpdatesGeometryAndAnnotations(t *testing.T) {
 	ctx := annotationTestContext(t)
-	d, _, attrs, err := ctx.PageDict(1, false)
+	d, _, attrs, err := ctx.PageDict(t.Context(), 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestResizeBlankPageUpdatesGeometryAndAnnotations(t *testing.T) {
 	ann := types.Dict{"Rect": types.Array{types.Integer(10), types.Integer(20), types.Integer(30), types.Integer(40)}}
 	d["Annots"] = types.Array{ann}
 
-	if err := Resize(ctx, types.IntSet{1: true}, &model.Resize{Scale: 0.5}); err != nil {
+	if err := Resize(t.Context(), ctx, types.IntSet{1: true}, &model.Resize{Scale: 0.5}); err != nil {
 		t.Fatal(err)
 	}
 	mediaBox := resizeTestRectangle(t, ctx, d["MediaBox"])
@@ -88,11 +88,11 @@ func TestResizeBlankPageUpdatesGeometryAndAnnotations(t *testing.T) {
 	if r.LL.X != 5 || r.LL.Y != 10 || r.UR.X != 15 || r.UR.Y != 20 {
 		t.Fatalf("expected transformed blank-page annotation, got %s", r)
 	}
-	if _, found := d.Find("CropBox"); found {
-		t.Fatal("expected blank-page CropBox removal")
+	if got := resizeTestRectangle(t, ctx, d["CropBox"]); !got.Equals(*mediaBox) {
+		t.Fatal("expected resized CropBox to match MediaBox")
 	}
-	if _, found := d.Find("Rotate"); found {
-		t.Fatal("expected blank-page Rotate removal")
+	if rotation := d.IntEntry("Rotate"); rotation == nil || *rotation != 0 {
+		t.Fatal("expected normalized blank-page rotation")
 	}
 }
 
@@ -121,7 +121,7 @@ func TestResizeProcessesSelectedPagesInOrder(t *testing.T) {
 	ctx := annotationTestContext(t)
 	selectedPages := types.IntSet{0: true, 2: true}
 	for range 200 {
-		err := Resize(ctx, selectedPages, &model.Resize{Scale: 0.5})
+		err := Resize(t.Context(), ctx, selectedPages, &model.Resize{Scale: 0.5})
 		if err == nil || !strings.HasPrefix(err.Error(), "page 0:") {
 			t.Fatalf("expected lowest selected page first, got %v", err)
 		}
@@ -145,10 +145,14 @@ func TestResizeAnnotationErrorIncludesObjectIdentity(t *testing.T) {
 		want string
 	}{
 		{name: "annotation", run: func() error {
-			return resizePageAnnotations(ctx, types.Dict{"Annots": types.Array{*types.NewIndirectRef(77, 0)}}, matrix.IdentMatrix)
+			return resizePageAnnotations(
+				t.Context(), ctx, types.Dict{"Annots": types.Array{*types.NewIndirectRef(77, 0)}}, matrix.IdentMatrix,
+			)
 		}, want: "annotation 1 obj#77"},
 		{name: "Annots", run: func() error {
-			return resizePageAnnotations(ctx, types.Dict{"Annots": *types.NewIndirectRef(78, 0)}, matrix.IdentMatrix)
+			return resizePageAnnotations(
+				t.Context(), ctx, types.Dict{"Annots": *types.NewIndirectRef(78, 0)}, matrix.IdentMatrix,
+			)
 		}, want: "Annots obj#78"},
 		{name: "Rect", run: func() error {
 			return resizeAnnotationRect(ctx, types.Dict{"Rect": *types.NewIndirectRef(79, 0)}, matrix.IdentMatrix)
@@ -239,13 +243,13 @@ func TestParseResizeConfigRejectsMalformedClauses(t *testing.T) {
 func TestPrepTransformHonorsEnforcedOrientation(t *testing.T) {
 	src := types.RectForDim(200, 100)
 	dest := types.RectForDim(100, 200)
-	prepTransform(src, dest, true)
+	prepTransform(src, dest, true, true)
 	if dest.Width() != 100 || dest.Height() != 200 {
 		t.Fatalf("expected enforced portrait destination, got %.0fx%.0f", dest.Width(), dest.Height())
 	}
 
 	dest = types.RectForDim(100, 200)
-	prepTransform(src, dest, false)
+	prepTransform(src, dest, false, true)
 	if dest.Width() != 200 || dest.Height() != 100 {
 		t.Fatalf("expected destination orientation adjustment, got %.0fx%.0f", dest.Width(), dest.Height())
 	}
@@ -293,13 +297,13 @@ func TestResizeAnnotationEntryErrorContext(t *testing.T) {
 func TestResizePageAnnotationsErrorContext(t *testing.T) {
 	ctx := annotationTestContext(t)
 	d := types.Dict{"Annots": types.Array{types.Dict{}, types.Integer(1)}}
-	err := resizePageAnnotations(ctx, d, matrix.IdentMatrix)
+	err := resizePageAnnotations(t.Context(), ctx, d, matrix.IdentMatrix)
 	if err == nil || !strings.Contains(err.Error(), "annotation 2: dereference dictionary") {
 		t.Fatalf("expected annotation index context, got %v", err)
 	}
 
 	d = types.Dict{"Annots": types.Array{types.Dict{"Rect": types.Array{types.Integer(1)}}}}
-	err = resizePageAnnotations(ctx, d, matrix.IdentMatrix)
+	err = resizePageAnnotations(t.Context(), ctx, d, matrix.IdentMatrix)
 	if err == nil || !strings.Contains(err.Error(), "annotation 1: annotation Rect: invalid length 1") {
 		t.Fatalf("expected annotation entry context, got %v", err)
 	}
@@ -308,7 +312,7 @@ func TestResizePageAnnotationsErrorContext(t *testing.T) {
 // TestResizePageErrorContext verifies page and content operation context.
 func TestResizePageErrorContext(t *testing.T) {
 	ctx := annotationTestContext(t)
-	err := Resize(ctx, types.IntSet{99: true}, &model.Resize{Scale: 0.5})
+	err := Resize(t.Context(), ctx, types.IntSet{99: true}, &model.Resize{Scale: 0.5})
 	if err == nil || !strings.Contains(err.Error(), "page 99: page dictionary") {
 		t.Fatalf("expected page dictionary context, got %v", err)
 	}
@@ -316,7 +320,7 @@ func TestResizePageErrorContext(t *testing.T) {
 	ctx = annotationTestContext(t)
 	d := annotationTestPageDict(t, ctx)
 	d["Contents"] = types.Integer(1)
-	err = Resize(ctx, types.IntSet{1: true}, &model.Resize{Scale: 0.5})
+	err = Resize(t.Context(), ctx, types.IntSet{1: true}, &model.Resize{Scale: 0.5})
 	if err == nil || !strings.Contains(err.Error(), "page 1: read page content") {
 		t.Fatalf("expected page content context, got %v", err)
 	}
@@ -324,7 +328,7 @@ func TestResizePageErrorContext(t *testing.T) {
 	ctx = annotationTestContext(t)
 	d = annotationTestPageDict(t, ctx)
 	d["Annots"] = types.Integer(1)
-	err = Resize(ctx, types.IntSet{1: true}, &model.Resize{Scale: 0.5})
+	err = Resize(t.Context(), ctx, types.IntSet{1: true}, &model.Resize{Scale: 0.5})
 	if err == nil || !strings.Contains(err.Error(), "page 1: resize annotations: Annots: dereference array") {
 		t.Fatalf("expected page annotation context, got %v", err)
 	}

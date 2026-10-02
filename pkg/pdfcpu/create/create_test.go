@@ -17,16 +17,34 @@
 package create
 
 import (
+	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/pdfcpu/pdfcpu/pkg/font"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/primitives"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
+
+func useMissingGlobalFontDirectory(t *testing.T) {
+	t.Helper()
+	originalDir := font.UserFontDir
+	font.UserFontDir = filepath.Join(t.TempDir(), "missing")
+	if err := font.ReloadUserFonts(t.Context()); err == nil {
+		t.Fatal("expected missing global font directory error")
+	}
+	t.Cleanup(func() {
+		font.UserFontDir = originalDir
+		if err := font.ReloadUserFonts(context.WithoutCancel(t.Context())); err != nil {
+			t.Errorf("restore global font directory: %v", err)
+		}
+	})
+}
 
 type failingJSONReader struct {
 	err error
@@ -46,6 +64,24 @@ func newCreateTestContext(t *testing.T) *model.Context {
 	return ctx
 }
 
+func TestEnsureFontIndRefUsesStatelessRepository(t *testing.T) {
+	useMissingGlobalFontDirectory(t)
+	indRef := types.NewIndirectRef(7, 0)
+	xRefTable := &model.XRefTable{Conf: model.NewStatelessConfiguration()}
+	fontResource := model.FontResource{
+		Res:      model.Resource{IndRef: indRef},
+		FontFile: indRef,
+	}
+
+	got, err := ensureFontIndRef(t.Context(), xRefTable, "Demo", fontResource, model.FontMap{"Demo": fontResource})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || *got != *indRef {
+		t.Fatalf("expected existing font reference %v, got %v", indRef, got)
+	}
+}
+
 const createTestBlankPageJSON = `{
 	"pages": {
 		"1": {
@@ -53,6 +89,25 @@ const createTestBlankPageJSON = `{
 		}
 	}
 }`
+
+func TestFromJSONBlankPageIncludesEmptyResources(t *testing.T) {
+	ctx := newCreateTestContext(t)
+	if err := FromJSON(t.Context(), ctx, strings.NewReader(createTestBlankPageJSON)); err != nil {
+		t.Fatal(err)
+	}
+
+	pageDict, _, _, err := ctx.PageDict(t.Context(), 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources, found := pageDict.Find("Resources")
+	if !found {
+		t.Fatal("page dict: missing Resources")
+	}
+	if d, ok := resources.(types.Dict); !ok || len(d) != 0 {
+		t.Fatalf("page dict: expected empty Resources dict, got %T %v", resources, resources)
+	}
+}
 
 func TestFromJSONBoundaryErrors(t *testing.T) {
 	tests := []struct {
@@ -79,7 +134,7 @@ func TestFromJSONBoundaryErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := FromJSON(tt.ctx, tt.rd)
+			err := FromJSON(t.Context(), tt.ctx, tt.rd)
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -93,7 +148,7 @@ func TestFromJSONBoundaryErrors(t *testing.T) {
 func TestFromJSONReadErrorIncludesPhaseContext(t *testing.T) {
 	wantErr := errors.New("read failed")
 
-	err := FromJSON(newCreateTestContext(t), failingJSONReader{err: wantErr})
+	err := FromJSON(t.Context(), newCreateTestContext(t), failingJSONReader{err: wantErr})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
@@ -122,7 +177,7 @@ func TestFromJSONParseErrorsIncludePhaseContext(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := FromJSON(newCreateTestContext(t), strings.NewReader(tt.in))
+			err := FromJSON(t.Context(), newCreateTestContext(t), strings.NewReader(tt.in))
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -146,7 +201,7 @@ func TestFromJSONRenderPagesErrorIncludesPrimitiveContext(t *testing.T) {
 		}
 	}`
 
-	err := FromJSON(newCreateTestContext(t), strings.NewReader(input))
+	err := FromJSON(t.Context(), newCreateTestContext(t), strings.NewReader(input))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -167,17 +222,17 @@ func TestFromJSONRenderPagesErrorIncludesPrimitiveContext(t *testing.T) {
 
 func TestFromJSONUpdatePageTreeErrorIncludesPageContext(t *testing.T) {
 	ctx := newCreateTestContext(t)
-	if err := FromJSON(ctx, strings.NewReader(createTestBlankPageJSON)); err != nil {
+	if err := FromJSON(t.Context(), ctx, strings.NewReader(createTestBlankPageJSON)); err != nil {
 		t.Fatal(err)
 	}
 
-	pageDict, _, _, err := ctx.PageDict(1, false)
+	pageDict, _, _, err := ctx.PageDict(t.Context(), 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	pageDict["Contents"] = types.Name("broken")
 
-	err = FromJSON(ctx, strings.NewReader(createTestBlankPageJSON))
+	err = FromJSON(t.Context(), ctx, strings.NewReader(createTestBlankPageJSON))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -217,7 +272,7 @@ func TestFromJSONUpdateFormErrorIncludesDefaultResourceContext(t *testing.T) {
 		XRefTable: ctx.XRefTable,
 	}
 
-	err := handleForm(ctx, pdf, types.Array{}, model.FontMap{})
+	err := handleForm(t.Context(), ctx, pdf, types.Array{}, model.FontMap{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -244,7 +299,7 @@ func TestFromJSONContentValidateErrorIncludesPhaseContext(t *testing.T) {
 		}
 	}`
 
-	err := FromJSON(newCreateTestContext(t), strings.NewReader(input))
+	err := FromJSON(t.Context(), newCreateTestContext(t), strings.NewReader(input))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -320,7 +375,7 @@ func TestFromJSONValidationContext(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := FromJSON(newCreateTestContext(t), strings.NewReader(tt.in))
+			err := FromJSON(t.Context(), newCreateTestContext(t), strings.NewReader(tt.in))
 			if err == nil {
 				t.Fatal("expected error")
 			}

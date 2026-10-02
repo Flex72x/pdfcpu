@@ -40,7 +40,7 @@ func testImportImages(t *testing.T, msg string, imgFiles []string, outFile, impC
 		}
 	}
 	cmd := cli.ImportImagesCommand(imgFiles, outFile, imp, conf)
-	if _, err := cli.Dispatch(cmd); err != nil {
+	if _, err := cli.Dispatch(t.Context(), cmd); err != nil {
 		t.Fatalf("%s %s: %v\n", msg, outFile, err)
 	}
 	if err := validateFile(t, outFile, conf); err != nil {
@@ -80,6 +80,12 @@ func TestImportCommand(t *testing.T) {
 			"CenteredGraySepia.pdf",
 			"f:A4, pos:c, sc:1, bgcol:#beded9"},
 
+		// Render each image of a multi-page TIFF on its own page.
+		{"TestMultiPageTIFF",
+			[]string{filepath.Join(resDir, "multipage.tif")},
+			"MultiPageTIFF.pdf",
+			"pos:full"},
+
 		// Page dimensions match image dimensions.
 		{"TestFull",
 			imageFileNames(t, filepath.Join(resDir)),
@@ -87,5 +93,13 @@ func TestImportCommand(t *testing.T) {
 			"pos:full"},
 	} {
 		testImportImages(t, tt.msg, tt.imgFiles, tt.outFile, tt.impConf)
+	}
+
+	pageCount, err := api.PageCountFile(t.Context(), filepath.Join(outDir, "MultiPageTIFF.pdf"))
+	if err != nil {
+		t.Fatalf("TestMultiPageTIFF: %v\n", err)
+	}
+	if pageCount != 2 {
+		t.Fatalf("TestMultiPageTIFF: want 2 pages, got %d\n", pageCount)
 	}
 }

@@ -66,15 +66,84 @@ func preserveCertificatePoolState(t *testing.T) {
 
 func installCertificatePoolTestFile(t *testing.T, dir string) {
 	t.Helper()
-	certs, err := LoadCertificatesFile(filepath.Join("model", "resources", "certs", "uk.p7c"))
+	certs, err := LoadCertificatesFile(t.Context(), filepath.Join("model", "resources", "certs", "uk.p7c"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveCertificates(certs, filepath.Join(dir, "uk.p7c")); err != nil {
+	if err := SaveCertificates(t.Context(), certs, filepath.Join(dir, "uk.p7c")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestCertificatePoolForStatelessConfigurationDoesNotLoadStore verifies stateless trust isolation.
+func TestCertificatePoolForStatelessConfigurationDoesNotLoadStore(t *testing.T) {
+	preserveCertificatePoolState(t)
+	model.TrustedCertDir = filepath.Join(t.TempDir(), "missing")
+
+	pool, err := CertificatePoolForConfiguration(t.Context(), model.NewStatelessConfiguration())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool == nil || len(pool.Subjects()) != 0 {
+		t.Fatalf("stateless certificate pool: got %v, want empty non-nil pool", pool)
+	}
+
+	trustedCertificatePool.RLock()
+	loaded := trustedCertificatePool.loaded
+	trustedCertificatePool.RUnlock()
+	if loaded {
+		t.Fatal("stateless configuration populated the certificate cache")
+	}
+	if model.UserCertPool != nil {
+		t.Fatal("stateless configuration published a legacy certificate pool")
+	}
+}
+
+// TestCertificatePoolForConfigurationLoadsSelectedStore verifies configuration-aware trust loading.
+func TestCertificatePoolForConfigurationLoadsSelectedStore(t *testing.T) {
+	preserveCertificatePoolState(t)
+	trustedDir := t.TempDir()
+	model.TrustedCertDir = trustedDir
+	installCertificatePoolTestFile(t, trustedDir)
+
+	pool, err := CertificatePoolForConfiguration(t.Context(), &model.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool == nil || len(pool.Subjects()) == 0 {
+		t.Fatal("expected certificate pool from selected store")
+	}
+	if model.UserCertPool != nil {
+		t.Fatal("configuration-aware load published a legacy certificate pool")
+	}
+}
+
+// TestConfigurationCertificatePoolDoesNotReplaceLegacyPool verifies configuration-specific trust loading remains isolated.
+func TestConfigurationCertificatePoolDoesNotReplaceLegacyPool(t *testing.T) {
+	preserveCertificatePoolState(t)
+	legacyDir := t.TempDir()
+	installCertificatePoolTestFile(t, legacyDir)
+	model.TrustedCertDir = legacyDir
+	if err := LoadCertificates(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	legacyPool := userCertificatePool()
+
+	configurationDir := t.TempDir()
+	installCertificatePoolTestFile(t, configurationDir)
+	model.TrustedCertDir = configurationDir
+	configurationPool, err := CertificatePoolForConfiguration(t.Context(), &model.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configurationPool == legacyPool {
+		t.Fatal("configuration-specific load reused the legacy certificate pool")
+	}
+	if got := userCertificatePool(); got != legacyPool {
+		t.Fatal("configuration-specific load replaced the legacy certificate pool")
 	}
 }
 
@@ -84,12 +153,12 @@ func TestLoadCertificatesRetriesAfterFailure(t *testing.T) {
 	trustedDir := filepath.Join(t.TempDir(), "trusted")
 	model.TrustedCertDir = trustedDir
 
-	if err := LoadCertificates(); !errors.Is(err, os.ErrNotExist) {
+	if err := LoadCertificates(t.Context()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected %v, got %v", os.ErrNotExist, err)
 	}
 
 	installCertificatePoolTestFile(t, trustedDir)
-	if err := LoadCertificates(); err != nil {
+	if err := LoadCertificates(t.Context()); err != nil {
 		t.Fatalf("retry load: %v", err)
 	}
 	if pool := userCertificatePool(); pool == nil || len(pool.Subjects()) == 0 {
@@ -104,7 +173,7 @@ func TestLoadCertificatesPreservesSuccessfulPool(t *testing.T) {
 	model.TrustedCertDir = trustedDir
 	installCertificatePoolTestFile(t, trustedDir)
 
-	if err := LoadCertificates(); err != nil {
+	if err := LoadCertificates(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	oldPool := userCertificatePool()
@@ -117,7 +186,7 @@ func TestLoadCertificatesPreservesSuccessfulPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	InvalidateCertificatePool()
-	if err := LoadCertificates(); !errors.Is(err, ErrNoCertificates) {
+	if err := LoadCertificates(t.Context()); !errors.Is(err, ErrNoCertificates) {
 		t.Fatalf("expected %v, got %v", ErrNoCertificates, err)
 	}
 	if pool := userCertificatePool(); pool != oldPool {
@@ -127,7 +196,7 @@ func TestLoadCertificatesPreservesSuccessfulPool(t *testing.T) {
 	if err := os.Remove(invalidFile); err != nil {
 		t.Fatal(err)
 	}
-	if err := LoadCertificates(); err != nil {
+	if err := LoadCertificates(t.Context()); err != nil {
 		t.Fatalf("retry load: %v", err)
 	}
 	if pool := userCertificatePool(); pool == nil || pool == oldPool {
@@ -142,7 +211,7 @@ func TestLoadCertificatesReloadsAfterReset(t *testing.T) {
 	model.TrustedCertDir = trustedDir
 	installCertificatePoolTestFile(t, trustedDir)
 
-	if err := LoadCertificates(); err != nil {
+	if err := LoadCertificates(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	oldPool := userCertificatePool()
@@ -154,7 +223,7 @@ func TestLoadCertificatesReloadsAfterReset(t *testing.T) {
 	if revision := model.CertificateStoreRevision(); revision <= oldRevision {
 		t.Fatalf("certificate store revision did not advance: got %d, previous %d", revision, oldRevision)
 	}
-	if err := LoadCertificates(); err != nil {
+	if err := LoadCertificates(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if pool := userCertificatePool(); pool == nil || pool == oldPool {
@@ -175,7 +244,7 @@ func TestLoadCertificatesConcurrent(t *testing.T) {
 	for range loadCount {
 		go func() {
 			<-start
-			errs <- LoadCertificates()
+			errs <- LoadCertificates(t.Context())
 		}()
 	}
 	close(start)
@@ -203,7 +272,7 @@ func TestLoadCertificatesFileReadContext(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fileName := filepath.Join(t.TempDir(), "missing"+tt.ext)
-			_, err := LoadCertificatesFile(fileName)
+			_, err := LoadCertificatesFile(t.Context(), fileName)
 			if !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("expected %v, got %v", os.ErrNotExist, err)
 			}
@@ -229,7 +298,7 @@ func TestLoadCertificatesFileRejectsCertificateFreeContainers(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := LoadCertificatesFile(writeCertificateErrorTestFile(t, tt.file, tt.data))
+			_, err := LoadCertificatesFile(t.Context(), writeCertificateErrorTestFile(t, tt.file, tt.data))
 			if !errors.Is(err, ErrNoCertificates) {
 				t.Fatalf("expected %v, got %v", ErrNoCertificates, err)
 			}
@@ -255,7 +324,7 @@ func TestLoadCertificatesFileParseContext(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := LoadCertificatesFile(writeCertificateErrorTestFile(t, tt.file, tt.data))
+			_, err := LoadCertificatesFile(t.Context(), writeCertificateErrorTestFile(t, tt.file, tt.data))
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("expected %q, got %v", tt.want, err)
 			}
@@ -290,7 +359,7 @@ func TestLoadCertificatesFilePKCS7PEM(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			certs, err := LoadCertificatesFile(writeCertificateErrorTestFile(t, "certificates.p7c", tt.data))
+			certs, err := LoadCertificatesFile(t.Context(), writeCertificateErrorTestFile(t, "certificates.p7c", tt.data))
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatal(err)
@@ -312,7 +381,7 @@ func TestCertificateSentinels(t *testing.T) {
 	if ErrUnknownFileType != ErrUnsupportedCertificateFile {
 		t.Fatal("unsupported certificate compatibility sentinel has different identity")
 	}
-	if _, err := LoadCertificatesFile("certificate.txt"); !errors.Is(err, ErrUnsupportedCertificateFile) {
+	if _, err := LoadCertificatesFile(t.Context(), "certificate.txt"); !errors.Is(err, ErrUnsupportedCertificateFile) {
 		t.Fatalf("expected %v, got %v", ErrUnsupportedCertificateFile, err)
 	}
 	if _, err := InspectCertificate(nil); !errors.Is(err, ErrMissingCertificate) {
@@ -321,17 +390,17 @@ func TestCertificateSentinels(t *testing.T) {
 	if _, err := saveCertsAsPEM(nil, "unused.pem", true); !errors.Is(err, ErrNoCertificates) {
 		t.Fatalf("expected %v, got %v", ErrNoCertificates, err)
 	}
-	if _, err := saveCertsAsP7C(nil, "unused.p7c", true); !errors.Is(err, ErrNoCertificates) {
+	if _, err := saveCertsAsP7C(t.Context(), nil, "unused.p7c", true); !errors.Is(err, ErrNoCertificates) {
 		t.Fatalf("expected %v, got %v", ErrNoCertificates, err)
 	}
-	if err := SaveCertificates([]*x509.Certificate{nil}, "unused.p7c"); !errors.Is(err, ErrMissingCertificate) {
+	if err := SaveCertificates(t.Context(), []*x509.Certificate{nil}, "unused.p7c"); !errors.Is(err, ErrMissingCertificate) {
 		t.Fatalf("expected %v, got %v", ErrMissingCertificate, err)
 	}
 }
 
 // TestSaveCertificatesWriteContext verifies save failures preserve filesystem causes.
 func TestSaveCertificatesWriteContext(t *testing.T) {
-	certs, err := LoadCertificatesFile(filepath.Join("model", "resources", "certs", "uk.p7c"))
+	certs, err := LoadCertificatesFile(t.Context(), filepath.Join("model", "resources", "certs", "uk.p7c"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +421,7 @@ func TestSaveCertificatesWriteContext(t *testing.T) {
 		{
 			name: "PKCS7",
 			save: func(fileName string) error {
-				_, err := saveCertsAsP7C(certs, fileName, true)
+				_, err := saveCertsAsP7C(t.Context(), certs, fileName, true)
 				return err
 			},
 			want: "write PKCS#7 certificates",
@@ -374,7 +443,7 @@ func TestSaveCertificatesWriteContext(t *testing.T) {
 // TestSaveCertsAsP7CPreservesCertificateParseClassification verifies malformed
 // certificate data retains PKCS#7 construction context and classification.
 func TestSaveCertsAsP7CPreservesCertificateParseClassification(t *testing.T) {
-	_, err := saveCertsAsP7C(
+	_, err := saveCertsAsP7C(t.Context(),
 		[]*x509.Certificate{{Raw: []byte{0x30, 0x01}}},
 		filepath.Join(t.TempDir(), "invalid.p7c"),
 		true,

@@ -18,11 +18,12 @@ package api
 
 import (
 	"bytes"
+	"context"
+	"crypto/x509"
 	"encoding/asn1"
 	"encoding/hex"
 	"errors"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,7 +60,10 @@ func TestSignatureStatsRetainsMultiSignatureIncrements(t *testing.T) {
 		{Signature: model.Signature{Type: model.SigTypeUR, Signed: true}},
 		{Signature: model.Signature{Type: model.SigTypeDTS, Signed: true, Visible: true}},
 	}
-	got := signatureStats(results)
+	got, err := signatureStats(t.Context(), results)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := model.SignatureStats{
 		FormSigned:        2,
 		FormSignedVisible: 1,
@@ -96,25 +100,34 @@ func TestDigestAndModelUseStoredSignatureText(t *testing.T) {
 				Status:    model.SignatureStatusUnknown,
 				Reason:    model.SignatureReasonCertNotTrusted,
 			}
-			apiOutput := strings.Join(digest([]*model.SignatureValidationResult{result}, false), "\n")
+			lines, err := digest(t.Context(), []*model.SignatureValidationResult{result}, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			apiOutput := strings.Join(lines, "\n")
 			modelOutput := result.String()
 			for name, output := range map[string]string{
 				"API":   apiOutput,
 				"model": modelOutput,
 			} {
 				if !strings.Contains(output, tt.typeString) ||
-					!strings.Contains(output, "Reason: "+reason) {
+					!strings.Contains(output, "Reason:") ||
+					!strings.Contains(output, reason) {
 					t.Errorf("%s output changed structured conclusion:\n%s", name, output)
 				}
 			}
 
 			result.Reason = model.SignatureReasonInternal
 			result.Problems = []string{problem}
-			apiOutput = strings.Join(digest([]*model.SignatureValidationResult{result}, false), "\n")
+			lines, err = digest(t.Context(), []*model.SignatureValidationResult{result}, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			apiOutput = strings.Join(lines, "\n")
 			if !strings.Contains(apiOutput, "Reason: "+problem) {
 				t.Fatalf("API digest rewrote stored Problem:\n%s", apiOutput)
 			}
-			if modelOutput = result.String(); !strings.Contains(modelOutput, "Problems: "+problem) {
+			if modelOutput = result.String(); !strings.Contains(modelOutput, "Problems:\n  "+problem) {
 				t.Fatalf("model output rewrote stored Problem:\n%s", modelOutput)
 			}
 		})
@@ -140,19 +153,29 @@ func TestCompactDigestPreservesDetailedEvidenceText(t *testing.T) {
 			Reason:    tt.reason,
 			Problems:  []string{tt.problem},
 		}
-		got := strings.Join(digest([]*model.SignatureValidationResult{result}, false), "\n")
+		lines, err := digest(t.Context(), []*model.SignatureValidationResult{result}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Join(lines, "\n")
 		want := "\n" +
 			"1 form signature (invisible, signed)\n" +
-			"   Status: validity of the signature is unknown\n" +
-			"   Reason: " + tt.problem + "\n" +
-			"   Signed: not available"
+			"  Integrity: signature unknown, signed content digest unknown\n" +
+			"     Status: validity of the signature is unknown\n" +
+			"     Reason: " + tt.problem + "\n" +
+			"     Signed: not available"
 		if got != want {
 			t.Errorf("compact output:\ngot:\n%q\nwant:\n%q", got, want)
 		}
 
-		full := strings.Join(digest([]*model.SignatureValidationResult{result}, true), "\n")
-		if !strings.Contains(full, "Reason: "+tt.reason.String()) ||
-			!strings.Contains(full, "Problems: "+tt.problem) {
+		lines, err = digest(t.Context(), []*model.SignatureValidationResult{result}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		full := strings.Join(lines, "\n")
+		if !strings.Contains(full, "Reason:") ||
+			!strings.Contains(full, tt.reason.String()) ||
+			!strings.Contains(full, "Problems:\n  "+tt.problem) {
 			t.Errorf("full output did not separate structured reason and Problem:\n%s", full)
 		}
 	}
@@ -196,7 +219,7 @@ func (signPanicReadSeekerAt) Seek(int64, int) (int64, error) {
 
 func signedPDFBytes(t *testing.T) []byte {
 	t.Helper()
-	inFile := filepath.Join("..", "samples", "signatures", "ETSI.CAdES.detached", "testPAdES_BB.pdf")
+	inFile := filepath.Join("..", "testdata", "signatures", "ETSI.CAdES.detached", "testPAdES_BB.pdf")
 	bb, err := os.ReadFile(inFile)
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +264,7 @@ func rawSignatureEvidence(t *testing.T, pdf []byte) (*model.SignatureValidationR
 	t.Helper()
 	conf := model.NewDefaultConfiguration()
 	conf.Offline = true
-	results, err := ValidateSignaturesRaw(bytes.NewReader(pdf), false, conf)
+	results, err := ValidateSignaturesRaw(t.Context(), bytes.NewReader(pdf), false, conf)
 	if err != nil {
 		t.Fatalf("expected reportable signature evidence, got fatal error %v", err)
 	}
@@ -258,6 +281,81 @@ func rawSignatureEvidence(t *testing.T, pdf []byte) (*model.SignatureValidationR
 	return results[0], strings.Join(problems, "\n")
 }
 
+func requireSignatureFailurePresentation(t *testing.T, result *model.SignatureValidationResult, compact, full string) {
+	t.Helper()
+	lines, err := digest(t.Context(), []*model.SignatureValidationResult{result}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := strings.Join(lines, "\n")
+	for _, want := range []string{
+		compact,
+		"     Status: " + result.Status.String(),
+		"     Reason: " + result.Reason.String(),
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("compact output missing %q:\n%s", want, output)
+		}
+	}
+
+	lines, err = digest(t.Context(), []*model.SignatureValidationResult{result}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output = strings.Join(lines, "\n")
+	if !strings.Contains(output, full) {
+		t.Errorf("full output missing failure evidence:\n%s", output)
+	}
+}
+
+func expectedFullIntegrityEvidence(signature, digest, profile, certificate string) string {
+	return strings.Join(fullSignatureFields("  ", []fullSignatureField{
+		{label: "Cryptographic signature", value: signature},
+		{label: "Signed content digest", value: digest},
+		{label: "Signature profile", value: profile},
+		{label: "Signer certificate", value: certificate},
+	}), "\n")
+}
+
+func requireIncompleteSignaturePresentation(
+	t *testing.T,
+	result *model.SignatureValidationResult,
+	problem,
+	fullEvidence string,
+) {
+	t.Helper()
+	lines, err := digest(t.Context(), []*model.SignatureValidationResult{result}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"  Integrity: signature unknown, signed content digest unknown",
+		"     Status: validity of the signature is unknown",
+		"     Reason: " + problem,
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("compact output missing %q:\n%s", want, output)
+		}
+	}
+
+	lines, err = digest(t.Context(), []*model.SignatureValidationResult{result}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output = strings.Join(lines, "\n")
+	for _, want := range []string{
+		fullEvidence,
+		"  Status:            validity of the signature is unknown",
+		"  Reason:            " + result.Reason.String(),
+		problem,
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("full output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 // TestSignAPIMissingArgumentsPreserveSentinels verifies public sign API argument guards.
 func TestSignAPIMissingArgumentsPreserveSentinels(t *testing.T) {
 	tests := []struct {
@@ -268,7 +366,7 @@ func TestSignAPIMissingArgumentsPreserveSentinels(t *testing.T) {
 		{
 			name: "validate signatures input",
 			err: func() error {
-				_, err := ValidateSignatures("", false, nil)
+				_, err := ValidateSignatures(t.Context(), "", false, nil)
 				return err
 			}(),
 			want: ErrMissingPDFInput,
@@ -276,24 +374,24 @@ func TestSignAPIMissingArgumentsPreserveSentinels(t *testing.T) {
 		{
 			name: "validate signatures file input",
 			err: func() error {
-				_, err := ValidateSignaturesFile("", false, false, nil)
+				_, err := ValidateSignaturesFile(t.Context(), "", false, false, nil)
 				return err
 			}(),
 			want: ErrMissingPDFInput,
 		},
 		{
 			name: "remove signatures reader",
-			err:  RemoveSignatures(nil, io.Discard, nil),
+			err:  RemoveSignatures(t.Context(), nil, io.Discard, nil),
 			want: ErrMissingPDFReadSeeker,
 		},
 		{
 			name: "remove signatures writer",
-			err:  RemoveSignatures(bytes.NewReader(nil), nil, nil),
+			err:  RemoveSignatures(t.Context(), bytes.NewReader(nil), nil, nil),
 			want: ErrMissingPDFWriter,
 		},
 		{
 			name: "remove signatures file input",
-			err:  RemoveSignaturesFile("", "", nil),
+			err:  RemoveSignaturesFile(t.Context(), "", "", nil),
 			want: ErrMissingPDFInput,
 		},
 	}
@@ -307,7 +405,7 @@ func TestSignAPIMissingArgumentsPreserveSentinels(t *testing.T) {
 
 // TestValidateSignaturesRawRejectsMissingInput verifies the stream API preserves its missing-reader sentinel.
 func TestValidateSignaturesRawRejectsMissingInput(t *testing.T) {
-	_, err := ValidateSignaturesRaw(nil, false, nil)
+	_, err := ValidateSignaturesRaw(t.Context(), nil, false, nil)
 	if !errors.Is(err, ErrMissingPDFReadSeeker) {
 		t.Fatalf("expected %v, got %v", ErrMissingPDFReadSeeker, err)
 	}
@@ -315,7 +413,7 @@ func TestValidateSignaturesRawRejectsMissingInput(t *testing.T) {
 
 // TestValidateSignaturesRawRejectsMalformedInput verifies every stream preparation phase is retained.
 func TestValidateSignaturesRawRejectsMalformedInput(t *testing.T) {
-	_, err := ValidateSignaturesRaw(bytes.NewReader([]byte("not a PDF")), false, nil)
+	_, err := ValidateSignaturesRaw(t.Context(), bytes.NewReader([]byte("not a PDF")), false, nil)
 	if err == nil {
 		t.Fatal("expected malformed stream failure")
 	}
@@ -330,7 +428,7 @@ func TestValidateSignaturesRawRejectsMalformedInput(t *testing.T) {
 func TestValidateSignaturesRawStructuralFailurePreservesCause(t *testing.T) {
 	cause := errors.New("structural read failure")
 
-	results, err := ValidateSignaturesRaw(signErrorReadSeekerAt{err: cause}, false, nil)
+	results, err := ValidateSignaturesRaw(t.Context(), signErrorReadSeekerAt{err: cause}, false, nil)
 	if results != nil {
 		t.Fatalf("got results %v, want nil", results)
 	}
@@ -360,7 +458,7 @@ func TestValidateSignaturesRawUnsignedPDFPrecedesTrustPool(t *testing.T) {
 		pdfcpu.InvalidateCertificatePool()
 	})
 
-	_, err = ValidateSignaturesRaw(bytes.NewReader(bb), false, nil)
+	_, err = ValidateSignaturesRaw(t.Context(), bytes.NewReader(bb), false, nil)
 	if !errors.Is(err, ErrNoSignatures) {
 		t.Fatalf("expected %v, got %v", ErrNoSignatures, err)
 	}
@@ -377,12 +475,12 @@ func TestValidateSignaturesRawUnsignedPDFSkipsDomainOperation(t *testing.T) {
 		t.Fatal(err)
 	}
 	called := false
-	operation := func(io.ReaderAt, *model.Context, bool) ([]*model.SignatureValidationResult, error) {
+	operation := func(context.Context, io.ReaderAt, *model.Context, bool, *x509.CertPool) ([]*model.SignatureValidationResult, error) {
 		called = true
 		return nil, errors.New("unexpected domain operation")
 	}
 
-	results, err := validateSignaturesRaw(bytes.NewReader(bb), false, nil, operation)
+	results, err := validateSignaturesRawUsing(t.Context(), bytes.NewReader(bb), false, nil, operation)
 	if results != nil {
 		t.Fatalf("got results %v, want nil", results)
 	}
@@ -398,9 +496,48 @@ func TestValidateSignaturesRawUnsignedPDFSkipsDomainOperation(t *testing.T) {
 	}
 }
 
+// TestValidateSignaturesRawStatelessUsesEmptyTrustPool verifies stateless validation does not read or inherit trust state.
+func TestValidateSignaturesRawStatelessUsesEmptyTrustPool(t *testing.T) {
+	oldDir := model.TrustedCertDir
+	model.TrustedCertDir = filepath.Join(t.TempDir(), "missing")
+	pdfcpu.InvalidateCertificatePool()
+	t.Cleanup(func() {
+		model.TrustedCertDir = oldDir
+		pdfcpu.InvalidateCertificatePool()
+	})
+
+	called := false
+	operation := func(
+		c context.Context,
+		_ io.ReaderAt,
+		_ *model.Context,
+		_ bool,
+		pool *x509.CertPool,
+	) ([]*model.SignatureValidationResult, error) {
+		called = true
+		if pool == nil || len(pool.Subjects()) != 0 {
+			t.Fatalf("stateless trust pool: got %v, want empty non-nil pool", pool)
+		}
+		return []*model.SignatureValidationResult{{}}, nil
+	}
+
+	results, err := validateSignaturesRawUsing(t.Context(),
+		bytes.NewReader(signedPDFBytes(t)),
+		false,
+		model.NewStatelessConfiguration(),
+		operation,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called || len(results) != 1 {
+		t.Fatalf("domain operation: called=%t, results=%d; want called=true, results=1", called, len(results))
+	}
+}
+
 // TestValidateSignaturesRawRecoversPanics verifies the stream API returns recovered boundary failures.
 func TestValidateSignaturesRawRecoversPanics(t *testing.T) {
-	_, err := ValidateSignaturesRaw(signPanicReadSeekerAt{}, false, nil)
+	_, err := ValidateSignaturesRaw(t.Context(), signPanicReadSeekerAt{}, false, nil)
 	if err == nil {
 		t.Fatal("expected recovered stream failure")
 	}
@@ -412,7 +549,7 @@ func TestValidateSignaturesRawRecoversPanics(t *testing.T) {
 // TestValidateSignaturesRawReadsSignedBytesReader verifies the raw operation does not depend on *os.File.
 func TestValidateSignaturesRawReadsSignedBytesReader(t *testing.T) {
 	rs := bytes.NewReader(signedPDFBytes(t))
-	results, err := ValidateSignaturesRaw(rs, false, nil)
+	results, err := ValidateSignaturesRaw(t.Context(), rs, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +567,7 @@ func TestValidateSignaturesRawPreservesSignedDataReadFailure(t *testing.T) {
 		err:    cause,
 	}
 
-	_, err := ValidateSignaturesRaw(rs, false, nil)
+	_, err := ValidateSignaturesRaw(t.Context(), rs, false, nil)
 	if err == nil {
 		t.Fatal("expected fatal signed-data read error")
 	}
@@ -446,14 +583,20 @@ func TestValidateSignaturesRawPreservesSignedDataReadFailure(t *testing.T) {
 
 // TestValidateSignaturesRawInitializesOperationState verifies default configuration and flags reach the domain boundary.
 func TestValidateSignaturesRawInitializesOperationState(t *testing.T) {
-	inFile := filepath.Join("..", "samples", "signatures", "ETSI.CAdES.detached", "testPAdES_BB.pdf")
+	inFile := filepath.Join("..", "testdata", "signatures", "ETSI.CAdES.detached", "testPAdES_BB.pdf")
 	bb, err := os.ReadFile(inFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	called := false
-	operation := func(_ io.ReaderAt, ctx *model.Context, all bool) ([]*model.SignatureValidationResult, error) {
+	operation := func(
+		c context.Context,
+		_ io.ReaderAt,
+		ctx *model.Context,
+		all bool,
+		_ *x509.CertPool,
+	) ([]*model.SignatureValidationResult, error) {
 		called = true
 		if ctx.Configuration == nil {
 			t.Fatal("expected initialized configuration")
@@ -467,7 +610,7 @@ func TestValidateSignaturesRawInitializesOperationState(t *testing.T) {
 		return []*model.SignatureValidationResult{{}}, nil
 	}
 
-	results, err := validateSignaturesRaw(bytes.NewReader(bb), true, nil, operation)
+	results, err := validateSignaturesRawUsing(t.Context(), bytes.NewReader(bb), true, nil, operation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,8 +622,9 @@ func TestValidateSignaturesRawInitializesOperationState(t *testing.T) {
 	}
 }
 
-// TestValidateSignaturesRawReportsMalformedSignatureEvidence verifies malformed signature metadata is nonfatal.
-func TestValidateSignaturesRawReportsMalformedSignatureEvidence(t *testing.T) {
+// TestValidateSignaturesRawReportsUnsupportedSubFilterEvidence verifies an
+// unsupported signature profile remains nonfatal.
+func TestValidateSignaturesRawReportsUnsupportedSubFilterEvidence(t *testing.T) {
 	pdf := signedPDFBytes(t)
 	oldValue := []byte("ETSI.CAdES.detached")
 	newValue := []byte("Unknown.Filter.Test")
@@ -495,12 +639,20 @@ func TestValidateSignaturesRawReportsMalformedSignatureEvidence(t *testing.T) {
 	copy(pdf[index:index+len(oldValue)], newValue)
 
 	result, problems := rawSignatureEvidence(t, pdf)
-	if result.Status != model.SignatureStatusUnknown {
-		t.Fatalf("got status %s, want unknown", result.Status)
+	if result.Status != model.SignatureStatusUnknown ||
+		result.Reason != model.SignatureReasonUnsupported {
+		t.Fatalf("got status=%s reason=%s, want unknown and unsupported", result.Status, result.Reason)
 	}
-	if want := "signature dict entry SubFilter: unsupported: value Unknown.Filter.Test"; !strings.Contains(problems, want) {
+	want := "signature dict entry SubFilter: unsupported: value Unknown.Filter.Test"
+	if !strings.Contains(problems, want) {
 		t.Fatalf("expected %q, got %q", want, problems)
 	}
+	requireIncompleteSignaturePresentation(
+		t,
+		result,
+		want,
+		expectedFullIntegrityEvidence("unknown", "unknown", "unknown", "unknown"),
+	)
 }
 
 // TestValidateSignaturesRawReportsUnsupportedAlgorithmEvidence verifies unknown PKCS#7 algorithms do not panic.
@@ -522,9 +674,57 @@ func TestValidateSignaturesRawReportsUnsupportedAlgorithmEvidence(t *testing.T) 
 		result.Reason != model.SignatureReasonUnsupported {
 		t.Fatalf("got status=%s reason=%s, want unknown and unsupported", result.Status, result.Reason)
 	}
-	if want := "pkcs7: verify signature unsupported"; !strings.Contains(problems, want) {
+	want := "pkcs7: verify signature unsupported"
+	if !strings.Contains(problems, want) {
 		t.Fatalf("expected %q, got %q", want, problems)
 	}
+	if len(result.Details.Signers) != 1 {
+		t.Fatalf("got %d signers, want one", len(result.Details.Signers))
+	}
+	evidence := result.Details.Signers[0].Evidence
+	if evidence.CertificateIdentified != model.True ||
+		evidence.SignatureAuthenticated != model.Unknown ||
+		evidence.DigestVerified != model.Unknown ||
+		evidence.ProfileValidated != model.Unknown {
+		t.Fatalf("unsupported algorithm produced incorrect evidence: %+v", evidence)
+	}
+	requireIncompleteSignaturePresentation(
+		t,
+		result,
+		want,
+		expectedFullIntegrityEvidence("unknown", "unknown", "unknown", "identified"),
+	)
+}
+
+// TestValidateSignaturesRawReportsMalformedContainerPresentation verifies
+// malformed PKCS#7 data remains distinct from unsupported algorithms and does
+// not manufacture evidence for checks that could not run.
+func TestValidateSignaturesRawReportsMalformedContainerPresentation(t *testing.T) {
+	pdf := mutateSignatureContents(t, signedPDFBytes(t), func(contents []byte) {
+		if len(contents) == 0 {
+			t.Fatal("missing PKCS#7 data")
+		}
+		contents[0] = byte(asn1.TagSet)
+	})
+
+	result, problems := rawSignatureEvidence(t, pdf)
+	if result.Status != model.SignatureStatusUnknown ||
+		result.Reason != model.SignatureReasonMalformed {
+		t.Fatalf("got status=%s reason=%s, want unknown and malformed", result.Status, result.Reason)
+	}
+	const want = "pkcs7: parse PKCS#7"
+	if !strings.Contains(problems, want) {
+		t.Fatalf("expected %q, got %q", want, problems)
+	}
+	if len(result.Details.Signers) != 0 {
+		t.Fatalf("malformed container produced %d signers", len(result.Details.Signers))
+	}
+	requireIncompleteSignaturePresentation(
+		t,
+		result,
+		want,
+		expectedFullIntegrityEvidence("unknown", "unknown", "unknown", "unknown"),
+	)
 }
 
 // TestValidateSignaturesRawReportsCertificateParseEvidence verifies malformed embedded certificates remain evidence.
@@ -594,78 +794,89 @@ func TestValidateSignaturesRawReportsDigestMismatchEvidence(t *testing.T) {
 	if want := "pkcs7: verify signature content mismatch"; !strings.Contains(problems, want) {
 		t.Fatalf("expected %q, got %q", want, problems)
 	}
+	if len(result.Details.Signers) != 1 {
+		t.Fatalf("got %d signers, want one", len(result.Details.Signers))
+	}
+	evidence := result.Details.Signers[0].Evidence
+	if evidence.SignatureAuthenticated != model.Unknown ||
+		evidence.DigestVerified != model.False {
+		t.Fatalf("digest mismatch produced incorrect evidence: %+v", evidence)
+	}
+	requireSignatureFailurePresentation(
+		t,
+		result,
+		"  Integrity: signature unknown, signed content digest mismatch",
+		expectedFullIntegrityEvidence("unknown", "mismatch", "unknown", "identified"),
+	)
+}
+
+// TestValidateSignaturesRawReportsForgedSignatureEvidence verifies a
+// cryptographic signature mismatch remains distinct from signed-content
+// modification evidence in the public result and presentation.
+func TestValidateSignaturesRawReportsForgedSignatureEvidence(t *testing.T) {
+	pdf := mutateSignatureContents(t, signedPDFBytes(t), func(contents []byte) {
+		p7, err := pkcs7.Parse(contents)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(p7.Signers) != 1 || len(p7.Signers[0].EncryptedDigest) == 0 {
+			t.Fatal("missing PKCS#7 signer signature")
+		}
+		index := bytes.LastIndex(contents, p7.Signers[0].EncryptedDigest)
+		if index < 0 {
+			t.Fatal("PKCS#7 signer signature not found")
+		}
+		contents[index] ^= 0xff
+	})
+
+	result, problems := rawSignatureEvidence(t, pdf)
+	if result.Status != model.SignatureStatusInvalid ||
+		result.Reason != model.SignatureReasonSignatureForged ||
+		result.DocModified != model.Unknown {
+		t.Fatalf(
+			"got status=%s reason=%s modified=%d, want invalid, forged and unknown",
+			result.Status,
+			result.Reason,
+			result.DocModified,
+		)
+	}
+	if want := "pkcs7: verify signature failure"; !strings.Contains(problems, want) {
+		t.Fatalf("expected %q, got %q", want, problems)
+	}
+	if len(result.Details.Signers) != 1 {
+		t.Fatalf("got %d signers, want one", len(result.Details.Signers))
+	}
+	evidence := result.Details.Signers[0].Evidence
+	if evidence.SignatureAuthenticated != model.False ||
+		evidence.DigestVerified != model.Unknown {
+		t.Fatalf("forged signature produced incorrect evidence: %+v", evidence)
+	}
+	requireSignatureFailurePresentation(
+		t,
+		result,
+		"  Integrity: signature not authentic, signed content digest unknown",
+		expectedFullIntegrityEvidence("not authentic", "unknown", "unknown", "identified"),
+	)
 }
 
 // TestValidateSignaturesRawDomainErrorPreservesCauseAndPhase verifies API-domain boundary wrapping.
 func TestValidateSignaturesRawDomainErrorPreservesCauseAndPhase(t *testing.T) {
 	cause := errors.New("domain signature failure")
-	operation := func(io.ReaderAt, *model.Context, bool) ([]*model.SignatureValidationResult, error) {
+	operation := func(context.Context, io.ReaderAt, *model.Context, bool, *x509.CertPool) ([]*model.SignatureValidationResult, error) {
 		return nil, cause
 	}
 
-	inFile := filepath.Join("..", "samples", "signatures", "ETSI.CAdES.detached", "testPAdES_BB.pdf")
+	inFile := filepath.Join("..", "testdata", "signatures", "ETSI.CAdES.detached", "testPAdES_BB.pdf")
 	bb, err := os.ReadFile(inFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = validateSignaturesRaw(bytes.NewReader(bb), false, nil, operation)
+	_, err = validateSignaturesRawUsing(t.Context(), bytes.NewReader(bb), false, nil, operation)
 	if !errors.Is(err, cause) {
 		t.Fatalf("expected %v, got %v", cause, err)
 	}
 	if want := "validate signatures: verify signatures"; !strings.Contains(err.Error(), want) {
-		t.Fatalf("expected %q, got %q", want, err)
-	}
-}
-
-// TestValidateSignaturesFileLifecycleJoinsOperationAndCloseErrors verifies production cleanup preserves both failures.
-func TestValidateSignaturesFileLifecycleJoinsOperationAndCloseErrors(t *testing.T) {
-	cause := errors.New("domain signature failure")
-	operation := func(ra io.ReaderAt, _ *model.Context, _ bool) ([]*model.SignatureValidationResult, error) {
-		f, ok := ra.(*os.File)
-		if !ok {
-			return nil, errors.New("domain input is not *os.File")
-		}
-		if err := f.Close(); err != nil {
-			return nil, err
-		}
-		return nil, cause
-	}
-
-	inFile := filepath.Join("..", "samples", "signatures", "ETSI.CAdES.detached", "testPAdES_BB.pdf")
-	_, err := validateSignaturesFile(inFile, false, nil, operation)
-	for _, want := range []error{cause, fs.ErrClosed} {
-		if !errors.Is(err, want) {
-			t.Errorf("expected joined cause %v, got %v", want, err)
-		}
-	}
-	for _, want := range []string{"validate signatures: verify signatures", "validate signatures: close input"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("expected %q, got %q", want, err)
-		}
-	}
-}
-
-// TestValidateSignaturesFileLifecycleReturnsCloseErrorAfterSuccess verifies cleanup failure changes a successful result.
-func TestValidateSignaturesFileLifecycleReturnsCloseErrorAfterSuccess(t *testing.T) {
-	wantResults := []*model.SignatureValidationResult{{}}
-	operation := func(ra io.ReaderAt, _ *model.Context, _ bool) ([]*model.SignatureValidationResult, error) {
-		f, ok := ra.(*os.File)
-		if !ok {
-			return nil, errors.New("domain input is not *os.File")
-		}
-		if err := f.Close(); err != nil {
-			return nil, err
-		}
-		return wantResults, nil
-	}
-
-	inFile := filepath.Join("..", "samples", "signatures", "ETSI.CAdES.detached", "testPAdES_BB.pdf")
-	results, err := validateSignaturesFile(inFile, false, nil, operation)
-	if !errors.Is(err, fs.ErrClosed) {
-		t.Fatalf("expected close failure %v, got results %v and error %v", fs.ErrClosed, results, err)
-	}
-	if want := "validate signatures: close input"; !strings.Contains(err.Error(), want) {
 		t.Fatalf("expected %q, got %q", want, err)
 	}
 }
@@ -701,7 +912,7 @@ func TestValidateSignaturesPDFErrorsPrecedeTrustPoolError(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		_, err := ValidateSignatures(tt.inFile, false, nil)
+		_, err := ValidateSignatures(t.Context(), tt.inFile, false, nil)
 		if !errors.Is(err, tt.want) {
 			t.Errorf("%s: expected %v, got %v", tt.name, tt.want, err)
 			continue
@@ -717,6 +928,7 @@ func TestValidateSignaturesPDFErrorsPrecedeTrustPoolError(t *testing.T) {
 
 // TestValidateSignaturesTrustPoolErrorContext verifies trust failures surface after successful signed-PDF parsing.
 func TestValidateSignaturesTrustPoolErrorContext(t *testing.T) {
+	conf := model.NewDefaultConfiguration()
 	oldDir := model.TrustedCertDir
 	model.TrustedCertDir = filepath.Join(t.TempDir(), "missing")
 	pdfcpu.InvalidateCertificatePool()
@@ -725,8 +937,8 @@ func TestValidateSignaturesTrustPoolErrorContext(t *testing.T) {
 		pdfcpu.InvalidateCertificatePool()
 	})
 
-	inFile := filepath.Join("..", "samples", "signatures", "ETSI.CAdES.detached", "testPAdES_BB.pdf")
-	_, err := ValidateSignatures(inFile, false, nil)
+	inFile := filepath.Join("..", "testdata", "signatures", "ETSI.CAdES.detached", "testPAdES_BB.pdf")
+	_, err := ValidateSignatures(t.Context(), inFile, false, conf)
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected %v, got %v", os.ErrNotExist, err)
 	}
@@ -746,7 +958,7 @@ func TestSignAPIOpenErrorsPreserveCauseAndContext(t *testing.T) {
 		{
 			name: "validate signatures",
 			call: func() error {
-				_, err := ValidateSignatures(missing, false, nil)
+				_, err := ValidateSignatures(t.Context(), missing, false, nil)
 				return err
 			},
 			want: "validate signatures: open input " + missing,
@@ -754,7 +966,7 @@ func TestSignAPIOpenErrorsPreserveCauseAndContext(t *testing.T) {
 		{
 			name: "remove signatures",
 			call: func() error {
-				return RemoveSignaturesFile(missing, "", nil)
+				return RemoveSignaturesFile(t.Context(), missing, "", nil)
 			},
 			want: "remove signatures: open input " + missing,
 		},
@@ -780,7 +992,7 @@ func TestSignAPIMalformedPDFErrorsIncludeOperationAndReadPhase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, validateErr := ValidateSignatures(inFile, false, nil)
+	_, validateErr := ValidateSignatures(t.Context(), inFile, false, nil)
 	if validateErr == nil {
 		t.Fatal("expected signature-validation failure")
 	}
@@ -788,7 +1000,7 @@ func TestSignAPIMalformedPDFErrorsIncludeOperationAndReadPhase(t *testing.T) {
 		t.Errorf("validate signatures: expected %q, got %q", want, validateErr)
 	}
 
-	_, validateFileErr := ValidateSignaturesFile(inFile, false, false, nil)
+	_, validateFileErr := ValidateSignaturesFile(t.Context(), inFile, false, false, nil)
 	if validateFileErr == nil {
 		t.Fatal("expected signature-validation file failure")
 	}
@@ -796,7 +1008,7 @@ func TestSignAPIMalformedPDFErrorsIncludeOperationAndReadPhase(t *testing.T) {
 		t.Errorf("validate signatures file: expected %q, got %q", want, validateFileErr)
 	}
 
-	removeErr := RemoveSignatures(bytes.NewReader([]byte("not a PDF")), io.Discard, nil)
+	removeErr := RemoveSignatures(t.Context(), bytes.NewReader([]byte("not a PDF")), io.Discard, nil)
 	if removeErr == nil {
 		t.Fatal("expected signature-removal failure")
 	}
@@ -810,7 +1022,7 @@ func TestSignAPIMalformedPDFErrorsIncludeOperationAndReadPhase(t *testing.T) {
 
 // TestRemoveSignaturesWriteErrorPreservesCauseAndContext verifies output failures retain their operation phase.
 func TestRemoveSignaturesWriteErrorPreservesCauseAndContext(t *testing.T) {
-	inFile := filepath.Join("..", "samples", "signatures", "ETSI.CAdES.detached", "testPAdES_BB.pdf")
+	inFile := filepath.Join("..", "testdata", "signatures", "ETSI.CAdES.detached", "testPAdES_BB.pdf")
 	f, err := os.Open(inFile)
 	if err != nil {
 		t.Fatal(err)
@@ -822,7 +1034,7 @@ func TestRemoveSignaturesWriteErrorPreservesCauseAndContext(t *testing.T) {
 	}()
 
 	cause := errors.New("write failed")
-	err = RemoveSignatures(f, signErrorWriter{err: cause}, nil)
+	err = RemoveSignatures(t.Context(), f, signErrorWriter{err: cause}, nil)
 	if !errors.Is(err, cause) {
 		t.Fatalf("expected %v, got %v", cause, err)
 	}
@@ -841,7 +1053,7 @@ func TestRemoveSignaturesFileCreateOutputErrorPreservesCauseAndContext(t *testin
 	}
 	outFile := filepath.Join(t.TempDir(), "missing", "out.pdf")
 
-	err := RemoveSignaturesFile(inFile, outFile, nil)
+	err := RemoveSignaturesFile(t.Context(), inFile, outFile, nil)
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected %v, got %v", os.ErrNotExist, err)
 	}
@@ -861,7 +1073,7 @@ func TestSignAPINoSignaturesPreservesSentinelAndOperation(t *testing.T) {
 		{
 			name: "validate signatures",
 			call: func() error {
-				_, err := ValidateSignatures(inFile, false, nil)
+				_, err := ValidateSignatures(t.Context(), inFile, false, nil)
 				return err
 			},
 			want: "validate signatures",
@@ -869,7 +1081,7 @@ func TestSignAPINoSignaturesPreservesSentinelAndOperation(t *testing.T) {
 		{
 			name: "remove signatures",
 			call: func() error {
-				return RemoveSignaturesFile(inFile, filepath.Join(t.TempDir(), "out.pdf"), nil)
+				return RemoveSignaturesFile(t.Context(), inFile, filepath.Join(t.TempDir(), "out.pdf"), nil)
 			},
 			want: "remove signatures",
 		},
@@ -900,7 +1112,7 @@ func TestRemoveSignaturesFileFailurePreservesExistingOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := RemoveSignaturesFile(inFile, outFile, nil)
+	err := RemoveSignaturesFile(t.Context(), inFile, outFile, nil)
 	if err == nil {
 		t.Fatal("expected signature-removal failure")
 	}

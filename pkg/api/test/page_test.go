@@ -34,19 +34,19 @@ func TestInsertRemovePages(t *testing.T) {
 	inFile := filepath.Join(inDir, "Acroforms2.pdf")
 	outFile := filepath.Join(outDir, "test.pdf")
 
-	n1, err := api.PageCountFile(inFile)
+	n1, err := api.PageCountFile(t.Context(), inFile)
 	if err != nil {
 		t.Fatalf("%s %s: %v\n", msg, inFile, err)
 	}
 
 	// Insert an empty page before pages 1 and 2.
-	if err := api.InsertPagesFile(inFile, outFile, []string{"-2"}, true, nil, nil); err != nil {
+	if err := api.InsertPagesFile(t.Context(), inFile, outFile, []string{"-2"}, true, nil, nil); err != nil {
 		t.Fatalf("%s %s: %v\n", msg, outFile, err)
 	}
-	if err := api.ValidateFile(outFile, nil); err != nil {
+	if err := api.ValidateFile(t.Context(), outFile, nil, nil); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
-	n2, err := api.PageCountFile(outFile)
+	n2, err := api.PageCountFile(t.Context(), outFile)
 	if err != nil {
 		t.Fatalf("%s %s: %v\n", msg, outFile, err)
 	}
@@ -55,13 +55,13 @@ func TestInsertRemovePages(t *testing.T) {
 	}
 
 	// 	// Remove pages 1 and 2.
-	if err := api.RemovePagesFile(outFile, "", []string{"-2"}, nil); err != nil {
+	if err := api.RemovePagesFile(t.Context(), outFile, "", []string{"-2"}, nil); err != nil {
 		t.Fatalf("%s %s: %v\n", msg, outFile, err)
 	}
-	if err := api.ValidateFile(outFile, nil); err != nil {
+	if err := api.ValidateFile(t.Context(), outFile, nil, nil); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
-	n2, err = api.PageCountFile(outFile)
+	n2, err = api.PageCountFile(t.Context(), outFile)
 	if err != nil {
 		t.Fatalf("%s %s: %v\n", msg, inFile, err)
 	}
@@ -81,7 +81,7 @@ func TestRemovePagesDropsNamedDestsForRemovedPages(t *testing.T) {
 	}
 	defer f.Close()
 
-	ctx, err := api.ReadValidateAndOptimize(f, model.NewDefaultConfiguration())
+	ctx, err := api.ReadValidateAndOptimize(t.Context(), f, model.NewDefaultConfiguration(), nil)
 	if err != nil {
 		t.Fatalf("%s read: %v\n", msg, err)
 	}
@@ -90,39 +90,39 @@ func TestRemovePagesDropsNamedDestsForRemovedPages(t *testing.T) {
 		t.Fatalf("%s locate dests: %v\n", msg, err)
 	}
 
-	_, keptPage, _, err := ctx.PageDict(1, false)
+	_, keptPage, _, err := ctx.PageDict(t.Context(), 1, false)
 	if err != nil {
 		t.Fatalf("%s page 1: %v\n", msg, err)
 	}
-	_, removedPage, _, err := ctx.PageDict(ctx.PageCount, false)
+	_, removedPage, _, err := ctx.PageDict(t.Context(), ctx.PageCount, false)
 	if err != nil {
 		t.Fatalf("%s page %d: %v\n", msg, ctx.PageCount, err)
 	}
 
-	if err := ctx.Names["Dests"].Add(ctx.XRefTable, "kept", destArray(*keptPage), nil, nil); err != nil {
+	if err := ctx.Names["Dests"].Add(t.Context(), ctx.XRefTable, "kept", destArray(*keptPage), nil, nil); err != nil {
 		t.Fatalf("%s add kept dest: %v\n", msg, err)
 	}
-	if err := ctx.Names["Dests"].Add(ctx.XRefTable, "removed", destArray(*removedPage), nil, nil); err != nil {
+	if err := ctx.Names["Dests"].Add(t.Context(), ctx.XRefTable, "removed", destArray(*removedPage), nil, nil); err != nil {
 		t.Fatalf("%s add removed dest: %v\n", msg, err)
 	}
 
-	ctxNew, err := pdfcpu.ExtractPages(ctx, []int{1}, false)
+	ctxNew, err := pdfcpu.ExtractPages(t.Context(), ctx, []int{1}, false)
 	if err != nil {
 		t.Fatalf("%s extract: %v\n", msg, err)
 	}
 
-	if _, err := ctxNew.DereferenceDestArray("kept"); err != nil {
+	if _, err := ctxNew.DereferenceDestArray(t.Context(), "kept"); err != nil {
 		t.Fatalf("%s kept dest: %v\n", msg, err)
 	}
-	if _, ok := ctxNew.Names["Dests"].Value("removed"); ok {
+	if _, ok, err := ctxNew.Names["Dests"].Value(t.Context(), "removed"); err != nil || ok {
 		t.Fatalf("%s removed page destination still present\n", msg)
 	}
 
 	var buf bytes.Buffer
-	if err := api.WriteContext(ctxNew, &buf); err != nil {
+	if err := api.WriteContext(t.Context(), ctxNew, &buf); err != nil {
 		t.Fatalf("%s write: %v\n", msg, err)
 	}
-	if err := api.Validate(bytes.NewReader(buf.Bytes()), nil); err != nil {
+	if err := api.Validate(t.Context(), bytes.NewReader(buf.Bytes()), nil, nil); err != nil {
 		t.Fatalf("%s validate: %v\n", msg, err)
 	}
 }
@@ -147,7 +147,7 @@ func TestInsertCustomBlankPage(t *testing.T) {
 	}
 
 	// Insert an empty A5 page in landscape mode after page 5.
-	if err := api.InsertPagesFile(inFile, outFile, selectedPages, before, pageConf, conf); err != nil {
+	if err := api.InsertPagesFile(t.Context(), inFile, outFile, selectedPages, before, pageConf, conf); err != nil {
 		t.Fatalf("%s %s: %v\n", msg, outFile, err)
 	}
 
@@ -159,7 +159,7 @@ func TestInsertCustomBlankPage(t *testing.T) {
 	}
 
 	// Insert an empty page with dimensions 5 x 10 cm after every odd page.
-	if err := api.InsertPagesFile(inFile, outFile, selectedPages, before, pageConf, conf); err != nil {
+	if err := api.InsertPagesFile(t.Context(), inFile, outFile, selectedPages, before, pageConf, conf); err != nil {
 		t.Fatalf("%s %s: %v\n", msg, outFile, err)
 	}
 

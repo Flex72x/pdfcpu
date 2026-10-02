@@ -43,24 +43,36 @@ func TestDecodeNameHexInvalid(t *testing.T) {
 	}
 }
 
-// TestParseObjectContextRejectsRecursionDepth verifies object parsing respects recursion limits.
-func TestParseObjectContextRejectsRecursionDepth(t *testing.T) {
+// TestParseObjectRejectsRecursionDepth verifies object parsing respects recursion limits.
+func TestParseObjectRejectsRecursionDepth(t *testing.T) {
 	s := "[[[1]]]"
 
-	_, err := ParseObjectContext(t.Context(), &s, 0, 1)
+	_, err := ParseObject(t.Context(), &s, 0, 1)
 	if !errors.Is(err, ErrMaxRecursionDepthExceeded) {
 		t.Fatalf("got %v, want ErrMaxRecursionDepthExceeded", err)
 	}
 }
 
-func TestParseObjectContextBoundsRelaxedFallback(t *testing.T) {
+// TestParseObjectBoundsRelaxedFallback verifies relaxed parsing remains bounded.
+func TestParseObjectBoundsRelaxedFallback(t *testing.T) {
 	s := strings.Repeat("<</Differences[24/breve/quotesingle0 obj\r", 34)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 
-	_, err := ParseObjectContext(ctx, &s, 0)
+	_, err := ParseObject(ctx, &s, 0)
 	if !errors.Is(err, errArrayNotTerminated) {
 		t.Fatalf("got %v, want errArrayNotTerminated", err)
+	}
+}
+
+// TestParseRejectsMissingContext verifies context-aware parsers reject a nil context.
+func TestParseRejectsMissingContext(t *testing.T) {
+	s := "1"
+	if _, err := ParseObject(nil, &s, 0); !errors.Is(err, ErrMissingContext) {
+		t.Fatalf("parse object: got %v, want ErrMissingContext", err)
+	}
+	if _, _, err := DetectKeywords(nil, s); !errors.Is(err, ErrMissingContext) {
+		t.Fatalf("detect keywords: got %v, want ErrMissingContext", err)
 	}
 }
 
@@ -103,12 +115,12 @@ func TestPageTreeLookupRejectsRecursionDepth(t *testing.T) {
 	attrs := InheritedPageAttrs{}
 	pageCount := 0
 
-	_, _, err := xRefTable.processPageTreeForPageDictDepth(ir, &attrs, &pageCount, 1, false, maxDepth+1, NewPageTreeVisit())
+	_, _, err := xRefTable.processPageTreeForPageDictDepth(t.Context(), ir, &attrs, &pageCount, 1, false, maxDepth+1, NewPageTreeVisit())
 	if !errors.Is(err, ErrMaxRecursionDepthExceeded) {
 		t.Fatalf("got %v, want ErrMaxRecursionDepthExceeded", err)
 	}
 
-	_, err = xRefTable.processPageTreeForPageNumberDepth(ir, &pageCount, 1, maxDepth+1, NewPageTreeVisit())
+	_, err = xRefTable.processPageTreeForPageNumberDepth(t.Context(), ir, &pageCount, 1, maxDepth+1, NewPageTreeVisit())
 	if !errors.Is(err, ErrMaxRecursionDepthExceeded) {
 		t.Fatalf("got %v, want ErrMaxRecursionDepthExceeded", err)
 	}
@@ -128,7 +140,7 @@ func TestPageDictRejectsUnresolvedPage(t *testing.T) {
 	xRefTable.RootDict = types.Dict{"Pages": *pages}
 	xRefTable.PageCount = 1
 
-	d, indRef, attrs, err := xRefTable.PageDict(1, false)
+	d, indRef, attrs, err := xRefTable.PageDict(t.Context(), 1, false)
 	if err == nil {
 		t.Fatal("expected unresolved page error")
 	}
@@ -145,12 +157,12 @@ func TestPageTreeMutationRejectsRecursionDepth(t *testing.T) {
 	attrs := InheritedPageAttrs{}
 	pageCount := 0
 
-	_, err := xRefTable.insertBlankPagesDepth(ir, &attrs, &pageCount, nil, nil, false, maxDepth+1, NewPageTreeVisit())
+	_, err := xRefTable.insertBlankPagesDepth(t.Context(), ir, &attrs, &pageCount, nil, nil, false, maxDepth+1, NewPageTreeVisit())
 	if !errors.Is(err, ErrMaxRecursionDepthExceeded) {
 		t.Fatalf("got %v, want ErrMaxRecursionDepthExceeded", err)
 	}
 
-	_, err = xRefTable.insertPagesDepth(ir, &pageCount, nil, maxDepth+1, NewPageTreeVisit())
+	_, err = xRefTable.insertPagesDepth(t.Context(), ir, &pageCount, nil, maxDepth+1, NewPageTreeVisit())
 	if !errors.Is(err, ErrMaxRecursionDepthExceeded) {
 		t.Fatalf("got %v, want ErrMaxRecursionDepthExceeded", err)
 	}
@@ -170,7 +182,7 @@ func TestPageTreeRejectsCycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = xRefTable.processPageTreeForPageNumber(ir, &pageCount, 1)
+	_, err = xRefTable.processPageTreeForPageNumber(t.Context(), ir, &pageCount, 1)
 	if !errors.Is(err, ErrPageTreeCycle) {
 		t.Fatalf("got %v, want ErrPageTreeCycle", err)
 	}
@@ -196,7 +208,7 @@ func TestPageTreeRejectsDuplicateNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := xRefTable.processPageTreeForPageNumber(root, &pageCount, 1)
+	_, err := xRefTable.processPageTreeForPageNumber(t.Context(), root, &pageCount, 1)
 	if !errors.Is(err, ErrPageTreeDuplicate) {
 		t.Fatalf("got %v, want ErrPageTreeDuplicate", err)
 	}
@@ -218,12 +230,12 @@ func TestPageTreeOperationsRejectChildMissingType(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := xRefTable.processPageTreeForPageNumber(root, &pageCount, 1)
+	_, err := xRefTable.processPageTreeForPageNumber(t.Context(), root, &pageCount, 1)
 	if err == nil || !strings.Contains(err.Error(), "page tree kid obj#2: missing dict type") {
 		t.Fatalf("got %v, want missing page node Type error", err)
 	}
 
-	_, err = xRefTable.insertPagesDepth(root, &pageCount, nil, 0, NewPageTreeVisit())
+	_, err = xRefTable.insertPagesDepth(t.Context(), root, &pageCount, nil, 0, NewPageTreeVisit())
 	if err == nil || !strings.Contains(err.Error(), "page tree kid obj#2: missing dict type") {
 		t.Fatalf("got %v, want missing page node Type error", err)
 	}
@@ -255,6 +267,18 @@ func TestParseXRefStreamDictRejectsSizeLimit(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "Size") {
 		t.Fatalf("got %v, want Size limit error", err)
+	}
+}
+
+func TestParseXRefStreamDictRequiresDirectSize(t *testing.T) {
+	sd := types.StreamDict{Dict: types.Dict{
+		"Size": *types.NewIndirectRef(7, 0),
+		"W":    types.Array{types.Integer(1), types.Integer(1), types.Integer(1)},
+	}}
+
+	_, err := ParseXRefStreamDictWithLimits(&sd, DefaultResourceLimits())
+	if err == nil || !strings.Contains(err.Error(), `"Size" not available`) {
+		t.Fatalf("got %v, want direct Size error", err)
 	}
 }
 
@@ -313,6 +337,29 @@ func TestObjectStreamDictRejectsLimits(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "First") {
 		t.Fatalf("got %v, want First limit error", err)
+	}
+}
+
+func TestObjectStreamDictWithResolvedIntegersPreservesIndirectEntries(t *testing.T) {
+	nRef := *types.NewIndirectRef(7, 0)
+	firstRef := *types.NewIndirectRef(8, 0)
+	sd := types.StreamDict{Dict: types.Dict{
+		"Type":  types.Name("ObjStm"),
+		"N":     nRef,
+		"First": firstRef,
+	}}
+	n := types.Integer(3)
+	first := types.Integer(12)
+
+	osd, err := ObjectStreamDictWithResolvedIntegers(&sd, DefaultResourceLimits(), &n, &first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if osd.ObjCount != 3 || osd.FirstObjOffset != 12 {
+		t.Fatalf("got N=%d First=%d, want N=3 First=12", osd.ObjCount, osd.FirstObjOffset)
+	}
+	if sd.Dict["N"] != nRef || sd.Dict["First"] != firstRef {
+		t.Fatalf("object stream dictionary was normalized in place: %v", sd.Dict)
 	}
 }
 
@@ -382,7 +429,7 @@ func TestDetectKeywords(t *testing.T) {
 
 	s := "1 0 obj\n<<\n /Lang (en-endobject-stream-UK%)  % comment \n>>\nendobj\n\n2 0 obj\n"
 	//    0....... ..1 .........2.........3.........4.........5..... ... .6
-	endInd, _, err := DetectKeywords(s)
+	endInd, _, err := DetectKeywords(t.Context(), s)
 	if err != nil {
 		t.Errorf("%s failed: %v", msg, err)
 	}
@@ -392,7 +439,7 @@ func TestDetectKeywords(t *testing.T) {
 
 	// negative test
 	s = "1 0 obj\n<<\n /Lang (en-endobject-stream-UK%)  % endobject"
-	endInd, _, err = DetectKeywords(s)
+	endInd, _, err = DetectKeywords(t.Context(), s)
 	if err != nil {
 		t.Errorf("%s failed: %v", msg, err)
 	}
