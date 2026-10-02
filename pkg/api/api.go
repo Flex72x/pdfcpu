@@ -182,7 +182,7 @@ func WriteContext(c context.Context, ctx *model.Context, w io.Writer) (err error
 		// In order to retrieve the written file size.
 		ctx.Write.Fp = f
 	}
-	ctx.Write.Writer = bufio.NewWriter(w)
+	ctx.Write.Writer = bufio.NewWriter(contextutil.Writer(c, w))
 	defer func() {
 		if cancelErr := contextutil.Check(c); cancelErr != nil {
 			err = errors.Join(err, cancelErr)
@@ -206,7 +206,7 @@ func WriteIncrement(c context.Context, ctx *model.Context, w io.Writer) (err err
 		return ErrMissingPDFWriter
 	}
 
-	ctx.Write.Writer = bufio.NewWriter(w)
+	ctx.Write.Writer = bufio.NewWriter(contextutil.Writer(c, w))
 	defer func() {
 		if cancelErr := contextutil.Check(c); cancelErr != nil {
 			err = errors.Join(err, cancelErr)

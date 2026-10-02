@@ -481,7 +481,11 @@ func img(
 	resourceID, filters, lastFilter string,
 	objNr int) (*model.Image, error) {
 	if sd.FilterPipeline == nil {
-		sd.Content = sd.Raw
+		var err error
+		sd.Content, err = sd.RawBytes(imageLimits(ctx.XRefTable).MaxStreamBytes)
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		if err := decodeImage(ctx, sd, filters, lastFilter, objNr); err != nil {
 			return nil, err

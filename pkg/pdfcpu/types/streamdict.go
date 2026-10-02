@@ -40,8 +40,9 @@ type StreamDict struct {
 	StreamLength      *int64
 	StreamLengthObjNr *int
 	FilterPipeline    []PDFFilter
-	Raw               []byte // Encoded
-	Content           []byte // Decoded
+	Raw               []byte              // Encoded
+	RawSource         EncodedStreamSource // Immutable file/provider alternative to Raw
+	Content           []byte              // Decoded
 	//DCTImage          image.Image
 	IsPageContent bool
 	CSComponents  int
@@ -55,6 +56,7 @@ func NewStreamDict(d Dict, streamOffset int64, streamLength *int64, streamLength
 		streamLength,
 		streamLengthObjNr,
 		filterPipeline,
+		nil,
 		nil,
 		nil,
 		//nil,
@@ -252,11 +254,12 @@ func parmsForFilter(d Dict) map[string]int {
 
 // Encode applies sd's filter pipeline to sd.Content in order to produce sd.Raw.
 func (sd *StreamDict) Encode() error {
-	if sd.Content == nil && sd.Raw != nil {
+	if sd.Content == nil && (sd.Raw != nil || sd.RawSource != nil) {
 		// Not decoded yet, no need to encode.
 		return nil
 	}
 
+	sd.RawSource = nil
 	// No filter specified, nothing to encode.
 	if sd.FilterPipeline == nil {
 		if log.TraceEnabled() {
@@ -366,9 +369,14 @@ func (sd *StreamDict) DecodeWithLimit(maxDecodeBytes int64) error {
 	return err
 }
 
-func (sd *StreamDict) decodeLength(maxLen, maxDecodeBytes int64) ([]byte, error) {
+func (sd *StreamDict) decodeLength(maxLen, maxDecodeBytes int64) (_ []byte, err error) {
+	raw, err := sd.OpenRaw()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, raw.Close()) }()
 	var b, c io.Reader
-	b = bytes.NewReader(sd.Raw)
+	b = raw
 
 	// Apply each filter in the pipeline to result of preceding filter.
 	for idx, f := range sd.FilterPipeline {
@@ -461,7 +469,11 @@ func (sd *StreamDict) DecodeLengthWithLimit(maxLen, maxDecodeBytes int64) ([]byt
 	// No filter, sole DCT except CMYK, or terminal opaque image filters:
 	// nothing to decode for consumers that can preserve the original image stream.
 	if fpl == nil || len(fpl) == 1 && ((fpl[0].Name == filter.DCT && sd.CSComponents != 4) || preserveEncodedImageFilter(fpl[0].Name)) {
-		sd.Content = sd.Raw
+		var err error
+		sd.Content, err = sd.RawBytes(maxDecodeBytes)
+		if err != nil {
+			return nil, err
+		}
 		//fmt.Printf("decodedStream returning %d(#%02x)bytes: \n%s\n", len(sd.Content), len(sd.Content), hex.Dump(sd.Content))
 		if maxLen < 0 {
 			return sd.Content, nil

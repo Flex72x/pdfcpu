@@ -494,11 +494,11 @@ func writeStream(w *model.WriteContext, sd types.StreamDict) (int64, error) {
 		return 0, fmt.Errorf("failed to write raw content: %w", err)
 	}
 
-	c, err := w.Write(sd.Raw)
+	c, err := sd.WriteRawTo(w)
 	if err != nil {
 		return 0, fmt.Errorf("failed to write raw content: %w", err)
 	}
-	if int64(c) != *sd.StreamLength {
+	if c != *sd.StreamLength {
 		return 0, fmt.Errorf("failed to write raw content: %d bytes written - streamlength:%d", c, *sd.StreamLength)
 	}
 
@@ -584,6 +584,13 @@ func writeStreamDictObject(ctx *model.Context, objNr, genNr int, sd types.Stream
 		!isXRefStreamDict &&
 		!(len(sd.FilterPipeline) == 1 && sd.FilterPipeline[0].Name == "Crypt") {
 
+		if sd.RawSource != nil {
+			sd.Raw, err = sd.RawBytes(ctx.Limits.MaxStreamBytes)
+			if err != nil {
+				return err
+			}
+			sd.RawSource = nil
+		}
 		if sd.Raw, err = encryptStream(sd.Raw, objNr, genNr, ctx.EncKey, ctx.AES4Streams, ctx.E.R); err != nil {
 			return err
 		}

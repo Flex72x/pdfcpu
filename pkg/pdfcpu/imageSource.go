@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"image/jpeg"
+	"io"
 
 	"github.com/pdfcpu/pdfcpu/internal/contextutil"
 	"github.com/pdfcpu/pdfcpu/pkg/filter"
@@ -75,10 +76,16 @@ func ExtractEncodedImageSource(opCtx context.Context, doc *model.Context, sd *ty
 	if terminal != filter.DCT && terminal != filter.JPX && terminal != filter.JBIG2 {
 		return nil, false, nil
 	}
-	if int64(len(sd.Raw)) > imageLimits(doc.XRefTable).MaxStreamBytes {
+	if sd.RawLength() > imageLimits(doc.XRefTable).MaxStreamBytes {
 		return nil, true, ErrImageSourceLimit
 	}
-	source = &ImageSource{Data: sd.Raw}
+	source = &ImageSource{}
+	if n == 1 {
+		source.Data, err = sd.RawBytes(imageLimits(doc.XRefTable).MaxStreamBytes)
+		if err != nil {
+			return nil, true, imageSourceDecodeError(err)
+		}
+	}
 	if n > 1 {
 		local := *sd
 		local.Dict = sd.Dict.Clone().(types.Dict)
@@ -183,7 +190,31 @@ func ExtractImageSource(opCtx context.Context, doc *model.Context, sd *types.Str
 		}
 		return source, err
 	}
-	if int64(len(sd.Raw)) > imageLimits(doc.XRefTable).MaxStreamBytes {
+	source, err := imageRasterSourceFacts(doc, sd)
+	if err != nil {
+		return nil, err
+	}
+	w, h := source.Width, source.Height
+
+	local := *sd
+	local.Dict = sd.Dict.Clone().(types.Dict)
+	local.Dict["Width"], local.Dict["Height"] = types.Integer(w), types.Integer(h)
+	local.Content = nil
+	source.Data, err = local.DecodeLengthWithLimit(-1, imageLimits(doc.XRefTable).MaxDecodeBytes)
+	if err != nil {
+		return nil, imageSourceDecodeError(err)
+	}
+	if len(source.Data) != source.RowStride*h {
+		return nil, fmt.Errorf("%w: sample count %d, expected %d", ErrInvalidImageSource, len(source.Data), source.RowStride*h)
+	}
+	if err = contextutil.Check(opCtx); err != nil {
+		return nil, err
+	}
+	return source, nil
+}
+
+func imageRasterSourceFacts(doc *model.Context, sd *types.StreamDict) (*ImageSource, error) {
+	if sd.RawLength() > imageLimits(doc.XRefTable).MaxStreamBytes {
 		return nil, ErrImageSourceLimit
 	}
 	if mask := sd.BooleanEntry("ImageMask"); mask != nil && *mask {
@@ -245,21 +276,39 @@ func ExtractImageSource(opCtx context.Context, doc *model.Context, sd *types.Str
 		return nil, err
 	}
 	source.RowStride = int((int64(w)*int64(source.Components)*int64(source.BitsPerComponent) + 7) / 8)
+	return source, nil
+}
+
+// WriteRasterImageSource emits original row-aligned samples to a caller sink.
+// Facts/palette parsing and security policy are shared with ExtractImageSource;
+// this entry never installs or returns a full decoded sample cache.
+func WriteRasterImageSource(c context.Context, doc *model.Context, sd *types.StreamDict, writer io.Writer) (*ImageSource, error) {
+	if err := contextutil.Check(c); err != nil {
+		return nil, err
+	}
+	if err := requireContextWithXRefTable(doc); err != nil {
+		return nil, err
+	}
+	if err := requireStreamDict(sd); err != nil {
+		return nil, err
+	}
+	source, err := imageRasterSourceFacts(doc, sd)
+	if err != nil {
+		return nil, err
+	}
 	local := *sd
 	local.Dict = sd.Dict.Clone().(types.Dict)
-	local.Dict["Width"], local.Dict["Height"] = types.Integer(w), types.Integer(h)
+	local.Dict["Width"], local.Dict["Height"] = types.Integer(source.Width), types.Integer(source.Height)
 	local.Content = nil
-	source.Data, err = local.DecodeLengthWithLimit(-1, imageLimits(doc.XRefTable).MaxDecodeBytes)
+	n, err := local.WriteDecodedTo(c, writer, imageLimits(doc.XRefTable).MaxDecodeBytes)
 	if err != nil {
 		return nil, imageSourceDecodeError(err)
 	}
-	if len(source.Data) != source.RowStride*h {
-		return nil, fmt.Errorf("%w: sample count %d, expected %d", ErrInvalidImageSource, len(source.Data), source.RowStride*h)
+	expected := int64(source.RowStride) * int64(source.Height)
+	if n != expected {
+		return nil, fmt.Errorf("%w: sample count %d, expected %d", ErrInvalidImageSource, n, expected)
 	}
-	if err = contextutil.Check(opCtx); err != nil {
-		return nil, err
-	}
-	return source, nil
+	return source, contextutil.Check(c)
 }
 
 func sourceSpaceComponents(cs string) int {
