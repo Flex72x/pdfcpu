@@ -106,3 +106,21 @@ func TestWriteRasterLargeRawSourceDoesNotAllocateSamples(t *testing.T) {
 		t.Fatalf("decode limit: %v", err)
 	}
 }
+
+func TestWriteRasterSourcePreservesRendererTrailingSamples(t *testing.T) {
+	doc := sourceTestContext(t)
+	samples := []byte{0, 17, 33, 255}
+	sd := sourceTestStream(sourceTestFlate(t, append(bytes.Clone(samples), 10, 99)), types.Name(model.DeviceGrayCS), 8, 2, 2)
+	sd.FilterPipeline = []types.PDFFilter{{Name: filter.Flate}}
+	var out bytes.Buffer
+	if _, err := WriteRasterImageSource(t.Context(), doc, sd, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(samples, out.Bytes()) {
+		t.Fatal("trailer entered sample plane")
+	}
+	// The existing immutable extraction API retains its stricter contract.
+	if _, err := ExtractImageSource(t.Context(), doc, sd); !errors.Is(err, ErrInvalidImageSource) {
+		t.Fatalf("strict sample contract changed: %v", err)
+	}
+}

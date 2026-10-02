@@ -300,12 +300,17 @@ func WriteRasterImageSource(c context.Context, doc *model.Context, sd *types.Str
 	local.Dict = sd.Dict.Clone().(types.Dict)
 	local.Dict["Width"], local.Dict["Height"] = types.Integer(source.Width), types.Integer(source.Height)
 	local.Content = nil
-	n, err := local.WriteDecodedTo(c, writer, imageLimits(doc.XRefTable).MaxDecodeBytes)
+	expected := int64(source.RowStride) * int64(source.Height)
+	// RenderImage consumes only the dictionary-sized plane for non-Indexed
+	// images. Continue decoding trailing bytes to validate checksum/security,
+	// while retaining that existing rendering contract. Indexed extraction
+	// keeps its strict sample count.
+	samples := &imageRasterSampleWriter{writer: writer, remaining: expected}
+	n, err := local.WriteDecodedTo(c, samples, imageLimits(doc.XRefTable).MaxDecodeBytes)
 	if err != nil {
 		return nil, imageSourceDecodeError(err)
 	}
-	expected := int64(source.RowStride) * int64(source.Height)
-	if n != expected {
+	if n < expected || (len(source.Palette) > 0 && n != expected) {
 		return nil, fmt.Errorf("%w: sample count %d, expected %d", ErrInvalidImageSource, n, expected)
 	}
 	return source, contextutil.Check(c)
@@ -542,4 +547,27 @@ func IsStructuralReadError(err error) bool {
 		}
 	}
 	return false
+}
+
+// imageRasterSampleWriter forwards one sample plane and drains any decoded
+// trailer without buffering it. Decode limits apply to the complete stream.
+type imageRasterSampleWriter struct {
+	writer    io.Writer
+	remaining int64
+}
+
+func (w *imageRasterSampleWriter) Write(data []byte) (int, error) {
+	count := len(data)
+	prefix := min(int64(count), w.remaining)
+	if prefix > 0 {
+		n, err := w.writer.Write(data[:prefix])
+		w.remaining -= int64(n)
+		if err != nil {
+			return n, err
+		}
+		if int64(n) != prefix {
+			return n, io.ErrShortWrite
+		}
+	}
+	return count, nil
 }
