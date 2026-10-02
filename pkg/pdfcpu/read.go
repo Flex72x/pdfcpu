@@ -2471,17 +2471,9 @@ func buildFilterPipeline(c context.Context, ctx *model.Context, filterNames []st
 			continue
 		}
 
-		dict, ok := decodeParmsArr[i].(types.Dict)
-		if !ok {
-			indRef, ok := decodeParmsArr[i].(types.IndirectRef)
-			if !ok {
-				return nil, fmt.Errorf("filter pipeline DecodeParms entry %d: %w", i, errCorruptDecodeParms)
-			}
-			d, err := dereferencedDict(c, ctx, indRef.ObjectNumber.Value())
-			if err != nil {
-				return nil, fmt.Errorf("filter pipeline DecodeParms entry %d: %w", i, err)
-			}
-			dict = d
+		dict, err := resolvedFilterDecodeParms(c, ctx, name, decodeParmsArr[i])
+		if err != nil {
+			return nil, fmt.Errorf("filter pipeline DecodeParms entry %d: %w", i, err)
 		}
 
 		filterPipeline = append(filterPipeline, types.PDFFilter{Name: name, DecodeParms: dict})
@@ -2494,47 +2486,26 @@ func singleFilter(c context.Context, ctx *model.Context, filterName string, d ty
 	filterName = streamFilterName(ctx, filterName)
 	obj, found := d.Find("DecodeParms")
 	if !found {
-		// w/o decode parameters.
-		if log.ReadEnabled() {
-			log.Read.Println("singleFilter: end w/o decode parms")
-		}
 		return []types.PDFFilter{{Name: filterName}}, nil
 	}
-
-	var err error
-
-	if indRef, ok := obj.(types.IndirectRef); ok {
-		obj, err = dereferencedObject(c, ctx, indRef.ObjectNumber.Value())
-		if err != nil {
-			return nil, fmt.Errorf("single filter DecodeParms: %w", err)
-		}
+	obj, err := resolveDecodeParmsObject(c, ctx, obj)
+	if err != nil {
+		return nil, fmt.Errorf("single filter %s DecodeParms: %w", filterName, err)
 	}
-
-	if d, ok := obj.(types.Dict); ok {
-		if len(d) == 0 {
-			d = nil
-		}
-		return []types.PDFFilter{{Name: filterName, DecodeParms: d}}, nil
-	}
-
 	if arr, ok := obj.(types.Array); ok {
 		if len(arr) > 1 {
 			return nil, fmt.Errorf("single filter %s DecodeParms: %w", filterName, errCorruptDecodeParms)
 		}
-		if len(arr) == 0 || arr[0] == nil {
-			return []types.PDFFilter{{Name: filterName}}, nil
+		obj = nil
+		if len(arr) == 1 {
+			obj = arr[0]
 		}
-		d, ok := arr[0].(types.Dict)
-		if !ok {
-			return nil, fmt.Errorf("single filter %s DecodeParms: %w", filterName, errCorruptDecodeParms)
-		}
-		if len(d) == 0 {
-			d = nil
-		}
-		return []types.PDFFilter{{Name: filterName, DecodeParms: d}}, nil
 	}
-
-	return nil, fmt.Errorf("single filter %s DecodeParms: %w", filterName, errCorruptDecodeParms)
+	parms, err := resolvedFilterDecodeParms(c, ctx, filterName, obj)
+	if err != nil {
+		return nil, fmt.Errorf("single filter %s DecodeParms: %w", filterName, err)
+	}
+	return []types.PDFFilter{{Name: filterName, DecodeParms: parms}}, nil
 }
 
 func filterArraySupportsDecodeParms(ctx *model.Context, names []string) bool {
@@ -2594,9 +2565,13 @@ func pdfFilterPipeline(c context.Context, ctx *model.Context, dict types.Dict) (
 	decodeParms, found := dict.Find("DecodeParms")
 	if found {
 		if filterArraySupportsDecodeParms(ctx, names) {
-			decodeParmsArr, ok = decodeParms.(types.Array)
-			if ok {
-				if len(decodeParmsArr) != len(filterArray) {
+			decodeParms, err = resolveDecodeParmsObject(c, ctx, decodeParms)
+			if err != nil {
+				return nil, fmt.Errorf("filter pipeline DecodeParms: %w", err)
+			}
+			if decodeParms != nil {
+				decodeParmsArr, ok = decodeParms.(types.Array)
+				if !ok || len(decodeParmsArr) != len(filterArray) {
 					return nil, fmt.Errorf("filter pipeline DecodeParms: %w", errCorruptDecodeParms)
 				}
 			}
