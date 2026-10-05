@@ -62,12 +62,49 @@ func TestParseCorruptContent(t *testing.T) {
 		{"BI", "BI"},
 		{"BIData", "BI ID"},
 		{"BIColorSpace", "BI /CS "},
+		{"NameAtEnd", "/Name"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := parseContent(tt.content); err == nil {
 				t.Fatal("expected corrupt content error")
+			}
+		})
+	}
+}
+
+// TestParseContentEmptyName verifies that the empty name "/" is accepted.
+func TestParseContentEmptyName(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    func(PageResourceNames)
+	}{
+		{"FontOperandBeforeSpace", "BT/ -1 Tf ET/Im0 Do Q", func(w PageResourceNames) {
+			w["Font"][""] = true
+			w["XObject"]["Im0"] = true
+		}},
+		{"ExtGState", "q/ gs/Im1 Do Q", func(w PageResourceNames) {
+			w["ExtGState"][""] = true
+			w["XObject"]["Im1"] = true
+		}},
+		{"AtEndOfStream", "/Im2 Do/ Do", func(w PageResourceNames) {
+			w["XObject"]["Im2"] = true
+			w["XObject"][""] = true
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := NewPageResourceNames()
+			tt.want(want)
+			got, err := parseContent(tt.content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(want, got) {
+				t.Fatalf("want:\n%s\ngot:\n%s\n", want, got)
 			}
 		})
 	}

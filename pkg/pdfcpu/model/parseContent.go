@@ -331,10 +331,11 @@ func nextContentToken(pre string, line *string, prn PageResourceNames) (string, 
 		// Cut off at / [ ( < or white space.
 		l1 := l[1:]
 		i, _ := positionToNextWhitespaceOrChar(l1, "/[(<")
-		if i <= 0 {
+		if i < 0 {
 			*line = ""
 			return t, errPageContentCorrupt
 		}
+		// i == 0 is the valid empty name "/" (PDF 32000-1, 7.3.5), emitted by some producers e.g. "BT/ -1 Tf".
 		t = l1[:i]
 		l1 = l1[i:]
 		l1 = strings.TrimLeftFunc(l1, whitespaceOrEOL)
