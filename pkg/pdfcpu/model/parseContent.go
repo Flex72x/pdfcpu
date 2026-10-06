@@ -39,73 +39,65 @@ func whitespaceOrEOLOrClosingBracket(c rune) bool {
 	return unicode.IsSpace(c) || c == 0x0A || c == 0x0D || c == 0x00 || c == 0x5D
 }
 
+// skipDict skips the dictionary at the start of l. Literal and hexadecimal
+// strings are skipped as tokens, so "<<", ">>" and parentheses inside them do
+// not change the dictionary nesting.
 func skipDict(l *string) error {
 	s := *l
 	if !strings.HasPrefix(s, "<<") {
 		return ErrDictionaryCorrupt
 	}
 	s = s[2:]
-	j := 0
-	for {
-		i := strings.IndexAny(s, "<>")
+	depth := 1
+	for depth > 0 {
+		i := strings.IndexAny(s, "<>(")
 		if i < 0 {
 			return ErrDictionaryCorrupt
 		}
-		if s[i] == '<' {
-			if i == len(s)-1 {
-				return ErrDictionaryCorrupt
+		s = s[i:]
+		switch {
+		case strings.HasPrefix(s, "<<"):
+			depth++
+			s = s[2:]
+		case strings.HasPrefix(s, ">>"):
+			depth--
+			s = s[2:]
+		case s[0] == '(':
+			if err := skipStringLiteral(&s); err != nil {
+				return err
 			}
-			if s[i+1] == '<' {
-				j++
-				s = s[i+2:]
-				continue
+		case s[0] == '<':
+			if err := skipHexStringLiteral(&s); err != nil {
+				return err
 			}
-			s = s[i+1:]
-			continue
-		}
-		if s[i] == '>' {
-			if i == len(s)-1 {
-				return ErrDictionaryCorrupt
-			}
-			if s[i+1] == '>' {
-				if j > 0 {
-					j--
-					s = s[i+2:]
-					continue
-				}
-				*l = s[i+2:]
-				break
-			}
-			s = s[i+1:]
+		default:
+			s = s[1:]
 		}
 	}
+	*l = s
 	return nil
 }
 
+// skipStringLiteral skips the literal string at the start of l.
+// Unescaped parentheses inside it are balanced (PDF 32000-1, 7.3.4.2).
 func skipStringLiteral(l *string) error {
 	s := *l
-	i := 0
-	for {
-		i = strings.IndexByte(s, byte(')'))
-		if i <= 0 || i > 0 && s[i-1] != '\\' {
-			break
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				*l = s[i+1:]
+				return nil
+			}
 		}
-		k := 0
-		for j := i - 1; j >= 0 && s[j] == '\\'; j-- {
-			k++
-		}
-		if k%2 == 0 {
-			break
-		}
-		// Skip \)
-		s = s[i+1:]
 	}
-	if i < 0 {
-		return errStringLiteralCorrupt
-	}
-	s = s[i+1:]
-	*l = s
-	return nil
+	return errStringLiteralCorrupt
 }
 
 func skipHexStringLiteral(l *string) error {

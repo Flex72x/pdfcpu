@@ -109,3 +109,54 @@ func TestParseContentEmptyName(t *testing.T) {
 		})
 	}
 }
+
+// TestParseContentStringsInDictionary verifies that delimiters inside strings of a
+// marked-content property dictionary do not affect the dictionary nesting.
+func TestParseContentStringsInDictionary(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{"DoubleLessThan", `/Span <</ActualText (a<<b)>> BDC /Im0 Do EMC`},
+		{"DoubleGreaterThan", `/Span <</ActualText (a>>b)>> BDC /Im0 Do EMC`},
+		{"EscapedParenthesis", `/Span <</ActualText (a\)<<b)>> BDC /Im0 Do EMC`},
+		{"NestedParentheses", `/Span <</ActualText (a(<<)b)>> BDC /Im0 Do EMC`},
+		{"HexStringBeforeClose", `/Span <</ActualText <FEFF0041>>> BDC /Im0 Do EMC`},
+		{"NestedDictionary", `/Span <</A <</B (<<)>> /C <00>>> >> BDC /Im0 Do EMC`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := NewPageResourceNames()
+			want["XObject"]["Im0"] = true
+			got, err := parseContent(tt.content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(want, got) {
+				t.Fatalf("want:\n%s\ngot:\n%s\n", want, got)
+			}
+		})
+	}
+}
+
+// TestParseCorruptDictionaryInContent verifies that unterminated dictionaries and
+// strings inside them are reported instead of swallowing the rest of the stream.
+func TestParseCorruptDictionaryInContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{"UnterminatedDictionary", `/Span <</ActualText (a) BDC /Im0 Do`},
+		{"UnterminatedString", `/Span <</ActualText (a>> BDC /Im0 Do`},
+		{"UnterminatedHexString", `/Span <</ActualText <FEFF BDC /Im0 Do`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parseContent(tt.content); err == nil {
+				t.Fatal("expected corrupt content error")
+			}
+		})
+	}
+}
