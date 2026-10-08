@@ -121,6 +121,7 @@ type XRefTable struct {
 	Table               map[int]*XRefTableEntry
 	Size                *int               // from trailer dict.
 	MaxObjNr            int                // after reading in all objects from xRef table.
+	undefinedRefs       types.IntSet       // object numbers referenced but not defined; never reused for new objects.
 	PageCount           int                // Number of pages.
 	Root                *types.IndirectRef // Pointer to catalog (reference to root object).
 	RootDict            types.Dict         // Catalog
@@ -402,10 +403,20 @@ func (xRefTable *XRefTable) FindTableEntryForIndRef(indRef *types.IndirectRef) (
 }
 
 // IncrementRefCount increments the number of references for the object pointed to by indRef.
+// A reference to an undefined object is a reference to null (7.3.10), but its number stays taken:
+// a new object receiving it would make the reference resolve to that object.
 func (xRefTable *XRefTable) IncrementRefCount(indRef *types.IndirectRef) {
+	if indRef == nil {
+		return
+	}
 	if entry, ok := xRefTable.FindTableEntryForIndRef(indRef); ok {
 		entry.RefCount++
+		return
 	}
+	if xRefTable.undefinedRefs == nil {
+		xRefTable.undefinedRefs = types.IntSet{}
+	}
+	xRefTable.undefinedRefs[indRef.ObjectNumber.Value()] = true
 }
 
 // InsertNew adds given xRefTableEntry at next new objNumber into the cross reference table.
@@ -413,10 +424,14 @@ func (xRefTable *XRefTable) IncrementRefCount(indRef *types.IndirectRef) {
 // xRefTable.Size is the size entry of the first trailer dict processed.
 // Called on creation of new object streams.
 // Called by InsertAndUseRecycled.
+// Numbers of referenced but undefined objects are skipped.
 func (xRefTable *XRefTable) InsertNew(xRefTableEntry XRefTableEntry) (objNr int) {
 	objNr = *xRefTable.Size
+	for xRefTable.undefinedRefs[objNr] {
+		objNr++
+	}
 	xRefTable.Table[objNr] = &xRefTableEntry
-	*xRefTable.Size++
+	*xRefTable.Size = objNr + 1
 	return
 }
 
