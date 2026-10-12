@@ -25,13 +25,13 @@ func DecodeTo(name string, parms map[string]int, maxDecodeBytes int64, source io
 }
 
 func (f flate) decodeTo(source io.Reader, destination io.Writer) (total int64, err error) {
-	rc, err := acquireZlibReader(source)
+	rc, err := AcquireZlibReader(source)
 	if err != nil {
 		return 0, err
 	}
 	tracking := zlibErrorTrackingReader{r: rc}
 	// The reader pool is reused only after successful decoding.
-	defer func() { releaseZlibReader(rc, err == nil && tracking.err == nil) }()
+	defer func() { _ = ReleaseZlibReader(rc, err == nil && tracking.err == nil) }()
 	predictor, found := f.parms["Predictor"]
 	if !found || predictor == PredictorNo {
 		total, err = io.CopyBuffer(destination, io.LimitReader(&tracking, f.maxDecodeBytes+1), make([]byte, 32<<10))

@@ -313,9 +313,15 @@ type OptimizationContext struct {
 	CorruptFontResDicts []types.Dict        // Corrupted fontDicts encountered during bypassing xreftable.
 
 	// Image section
-	PageImages         []types.IntSet                // For each page a registry of image object numbers.
-	ImageObjects       map[int]*ImageObject          // ImageObject lookup table by image object number.
-	ImageObjectHashes  map[[32]byte][]int            // Image object numbers by encoded stream hash.
+	PageImages        []types.IntSet       // For each page a registry of image object numbers.
+	ImageObjects      map[int]*ImageObject // ImageObject lookup table by image object number.
+	ImageObjectHashes map[[32]byte][]int   // Image object numbers by encoded stream hash.
+	// ImageObjectKeys indexes images with an exact fingerprint; InexactImageHashes
+	// holds, by stream hash, images without one. Both keep registration order.
+	ImageObjectKeys    map[[32]byte][]int
+	InexactImageHashes map[[32]byte][]int
+	ImageObjectOrder   map[int]int                   // Registration sequence by image object number.
+	ObjectFingerprints FingerprintCache              // Fingerprints of indirect objects reached from image dicts.
 	DuplicateImages    map[int]*DuplicateImageObject // Registry of duplicate image dicts.
 	DuplicateImageObjs types.IntSet                  // The set of objects that represents the union of the object graphs of all duplicate image dicts.
 
@@ -345,6 +351,10 @@ func newOptimizationContext() *OptimizationContext {
 
 		ImageObjects:         map[int]*ImageObject{},
 		ImageObjectHashes:    map[[32]byte][]int{},
+		ImageObjectKeys:      map[[32]byte][]int{},
+		InexactImageHashes:   map[[32]byte][]int{},
+		ImageObjectOrder:     map[int]int{},
+		ObjectFingerprints:   FingerprintCache{},
 		DuplicateImages:      map[int]*DuplicateImageObject{},
 		DuplicateImageObjs:   types.IntSet{},
 		DuplicateInfoObjects: types.IntSet{},

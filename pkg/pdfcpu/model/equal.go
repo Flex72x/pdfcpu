@@ -73,8 +73,9 @@ func EqualObjects(c context.Context, o1, o2 types.Object, xRefTable *XRefTable, 
 		return false, err
 	}
 
-	if o1 == nil {
-		return o2 != nil, nil
+	if o1 == nil || o2 == nil {
+		// Null and dangling references are equal only to each other.
+		return o1 == nil && o2 == nil, nil
 	}
 
 	o1Type := fmt.Sprintf("%T", o1)

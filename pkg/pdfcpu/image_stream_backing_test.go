@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -72,5 +73,39 @@ func TestSpillImageStreamsCancellationAndDestinationFailure(t *testing.T) {
 	entry, _ := doc.FindTableEntry(ref.ObjectNumber.Value(), 0)
 	if !bytes.Equal(entry.Object.(types.StreamDict).Raw, sd.Raw) {
 		t.Fatal("failed sink changed original stream")
+	}
+}
+
+func TestSpillImageStreamsSharesOneBackingFile(t *testing.T) {
+	doc := sourceTestContext(t)
+	raws := [][]byte{[]byte("first"), {}, []byte("third stream")}
+	numbers := make([]int, len(raws))
+	for i, raw := range raws {
+		sd := types.StreamDict{Dict: types.Dict{"Type": types.Name("XObject"), "Subtype": types.Name("Image")}, Raw: raw}
+		ref, err := doc.IndRefForNewObject(sd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		numbers[i] = ref.ObjectNumber.Value()
+	}
+	dir := t.TempDir()
+	spilled, err := SpillImageStreams(t.Context(), doc, dir)
+	if err != nil || spilled != int64(len("first")+len("third stream")) {
+		t.Fatalf("spill: %d %v", spilled, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected one backing file, got %v %v", entries, err)
+	}
+	for i, number := range numbers {
+		entry, _ := doc.FindTableEntry(number, 0)
+		sd := entry.Object.(types.StreamDict)
+		var out bytes.Buffer
+		if sd.RawSource == nil || sd.Raw != nil {
+			t.Fatalf("stream %d not backed by the file", number)
+		}
+		if _, err := sd.WriteRawTo(&out); err != nil || !bytes.Equal(out.Bytes(), raws[i]) {
+			t.Fatalf("stream %d reads %q, %v; want %q", number, out.Bytes(), err, raws[i])
+		}
 	}
 }

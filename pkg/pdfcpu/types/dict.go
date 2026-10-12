@@ -38,14 +38,15 @@ func (d Dict) Len() int {
 	return len(d)
 }
 
-// Clone returns a clone of d.
+// Clone returns a clone of d. Keys are copied as stored: the source keys are
+// already distinct, and an Insert lookup per key would make cloning quadratic.
 func (d Dict) Clone() Object {
-	d1 := NewDict()
+	d1 := make(Dict, len(d))
 	for k, v := range d {
 		if v != nil {
 			v = v.Clone()
 		}
-		d1.Insert(k, v)
+		d1[k] = v
 	}
 	return d1
 }
@@ -98,6 +99,10 @@ func (d Dict) Find(key string) (Object, bool) {
 		return v, found
 	}
 	for n, v := range d {
+		if strings.IndexByte(n, '#') < 0 && strings.IndexByte(n, 0) < 0 {
+			// Without escapes a name decodes to itself, which the lookup above already checked.
+			continue
+		}
 		k, err := DecodeName(n)
 		if err != nil {
 			return nil, false

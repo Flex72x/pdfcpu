@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/pdfcpu/pdfcpu/internal/contextutil"
@@ -242,6 +243,25 @@ func newPositionedReader(rs io.ReadSeeker, offset *int64) (*bufio.Reader, error)
 	}
 
 	return bufio.NewReader(rs), nil
+}
+
+// positionedReaders reuses the buffers of object and stream reads: a large
+// document reads millions of objects, and a fresh 4 KiB buffer per read was
+// the largest allocation source of the whole compression pipeline.
+var positionedReaders = sync.Pool{New: func() any { return bufio.NewReader(nil) }}
+
+// acquirePositionedReader is newPositionedReader for callers that do not retain
+// the reader; release returns its buffer to the pool.
+func acquirePositionedReader(rs io.ReadSeeker, offset int64) (rd *bufio.Reader, release func(), err error) {
+	if _, err = rs.Seek(offset, io.SeekStart); err != nil {
+		return nil, nil, err
+	}
+	rd = positionedReaders.Get().(*bufio.Reader)
+	rd.Reset(rs)
+	return rd, func() {
+		rd.Reset(nil)
+		positionedReaders.Put(rd)
+	}, nil
 }
 
 func incrEpilogIndex(s string) int {
@@ -2227,14 +2247,15 @@ func repairableLastXRefSection(ctx *model.Context, err error) bool {
 }
 
 func growBufBy(buf []byte, size int, rd io.Reader) ([]byte, error) {
-	b := make([]byte, size)
-
-	if _, err := fillBuffer(rd, b); err != nil {
+	n := len(buf)
+	buf = slices.Grow(buf, size)[:n+size]
+	read, err := fillBuffer(rd, buf[n:])
+	if err != nil {
 		return nil, err
 	}
-	//log.Read.Printf("growBufBy: Read %d bytes\n", n)
-
-	return append(buf, b...), nil
+	// A short read at EOF leaves the zero tail the parser has always seen.
+	clear(buf[n+read:])
+	return buf, nil
 }
 
 func nextStreamOffset(line string, streamInd int) (int, error) {
@@ -2678,11 +2699,11 @@ func parseObjectWithValidationPolicy(c context.Context, ctx *model.Context, line
 }
 
 func object(c context.Context, ctx *model.Context, offset int64, objNr, genNr int) (o types.Object, endInd, streamInd int, streamOffset int64, err error) {
-	var rd io.Reader
-
-	if rd, err = newPositionedReader(ctx.Read.RS, &offset); err != nil {
+	rd, release, err := acquirePositionedReader(ctx.Read.RS, offset)
+	if err != nil {
 		return nil, 0, 0, 0, err
 	}
+	defer release()
 
 	//log.Read.Printf("object: seeked to offset:%d\n", offset)
 
@@ -2696,8 +2717,9 @@ func object(c context.Context, ctx *model.Context, offset int64, objNr, genNr in
 
 	//log.Read.Printf("buflen=%d\n%s", len(buf), hex.Dump(buf))
 
-	line := string(buf)
-
+	// Only the object header is copied out of buf: parsed names and strings
+	// share its memory, so copying all of buf would keep stream data and the
+	// following objects alive with them.
 	var l string
 
 	if endInd < 0 { // && streamInd >= 0, streamdict
@@ -2707,7 +2729,7 @@ func object(c context.Context, ctx *model.Context, offset int64, objNr, genNr in
 		if log.ReadEnabled() {
 			log.Read.Println("object: big stream, we parse object until stream")
 		}
-		l = line[:streamInd]
+		l = string(buf[:streamInd])
 	} else if streamInd < 0 { // dict
 		// buf: # gen obj ... obj dict ... endobj
 		// implies we detected endobj and no stream.
@@ -2715,7 +2737,7 @@ func object(c context.Context, ctx *model.Context, offset int64, objNr, genNr in
 		if log.ReadEnabled() {
 			log.Read.Println("object: small object w/o stream, parse until endobj")
 		}
-		l = line[:endInd]
+		l = string(buf[:endInd])
 	} else if streamInd < endInd { // streamdict
 		// buf: # gen obj ... obj dict ... stream ... data ... endstream endobj
 		// implies we detected endobj and stream.
@@ -2723,7 +2745,7 @@ func object(c context.Context, ctx *model.Context, offset int64, objNr, genNr in
 		if log.ReadEnabled() {
 			log.Read.Println("object: small stream within buffer, parse until stream")
 		}
-		l = line[:streamInd]
+		l = string(buf[:streamInd])
 	} else { // dict
 		// buf: # gen obj ... obj dict ... endobj # gen obj ... obj dict ... stream
 		// small obj w/o stream, parse until "endobj"
@@ -2731,7 +2753,7 @@ func object(c context.Context, ctx *model.Context, offset int64, objNr, genNr in
 		if log.ReadEnabled() {
 			log.Read.Println("object: small obj w/o stream, parse until endobj")
 		}
-		l = line[:endInd]
+		l = string(buf[:endInd])
 	}
 
 	// Parse object number and object generation.
@@ -3178,10 +3200,11 @@ func loadEncodedStreamContent(c context.Context, ctx *model.Context, sd *types.S
 		return fmt.Errorf("stream length: %w", err)
 	}
 
-	rd, err := newPositionedReader(ctx.Read.RS, &sd.StreamOffset)
+	rd, release, err := acquirePositionedReader(ctx.Read.RS, sd.StreamOffset)
 	if err != nil {
 		return fmt.Errorf("position stream reader: %w", err)
 	}
+	defer release()
 
 	l1 := 0
 	if !fixLength && sd.StreamLength != nil {

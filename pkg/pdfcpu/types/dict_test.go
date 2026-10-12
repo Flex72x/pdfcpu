@@ -50,3 +50,25 @@ func TestDictHasEntry(t *testing.T) {
 		t.Fatal("expected decoded entry C()")
 	}
 }
+
+func TestDictCloneIsDeepAndKeepsKeys(t *testing.T) {
+	d := Dict{"A#20B": Array{Integer(1)}, "N": nil}
+	c := d.Clone().(Dict)
+	if _, ok := c["N"]; len(c) != 2 || c["A#20B"] == nil || !ok {
+		t.Fatalf("clone lost keys: %v", c)
+	}
+	c["A#20B"].(Array)[0] = Integer(2)
+	if d["A#20B"].(Array)[0] != Integer(1) {
+		t.Fatal("clone shares nested objects with the source")
+	}
+}
+
+func TestDictFindDecodesEscapedNames(t *testing.T) {
+	d := Dict{"A#20B": Integer(1), "C": Integer(2)}
+	if v, ok := d.Find("A B"); !ok || v != Integer(1) {
+		t.Fatalf("escaped key not found: %v %t", v, ok)
+	}
+	if _, ok := d.Find("D"); ok {
+		t.Fatal("missing key found")
+	}
+}

@@ -387,11 +387,11 @@ func BenchmarkFlateWriterReuse(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
 			dst.Reset()
-			w := acquireZlibWriter(&dst)
+			w := AcquireZlibWriter(&dst)
 			if _, err := w.Write(data); err != nil {
 				b.Fatal(err)
 			}
-			if err := releaseZlibWriter(w, true); err != nil {
+			if err := ReleaseZlibWriter(w, true); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -428,12 +428,12 @@ func BenchmarkFlateReaderReuse(b *testing.B) {
 	b.Run("pooled", func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			r, err := acquireZlibReader(bytes.NewReader(encoded.Bytes()))
+			r, err := AcquireZlibReader(bytes.NewReader(encoded.Bytes()))
 			if err != nil {
 				b.Fatal(err)
 			}
 			_, err = io.Copy(io.Discard, r)
-			releaseZlibReader(r, err == nil)
+			_ = ReleaseZlibReader(r, err == nil)
 			if err != nil {
 				b.Fatal(err)
 			}

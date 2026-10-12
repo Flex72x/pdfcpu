@@ -27,22 +27,51 @@ type EncodedStreamSource interface {
 	Open() (io.ReadCloser, error)
 }
 
+// fileStreamSource is the section [offset, offset+size) of an immutable
+// regular file of fileSize bytes.
 type fileStreamSource struct {
-	path string
-	size int64
+	path     string
+	offset   int64
+	size     int64
+	fileSize int64
 }
 
 // NewFileStreamSource borrows an immutable regular file, opening it only while
 // a consumer reads it. It never holds a file descriptor between operations.
 func NewFileStreamSource(path string) (EncodedStreamSource, error) {
-	stat, err := os.Stat(path)
+	sections, err := OpenFileSections(path)
 	if err != nil {
 		return nil, err
 	}
-	if !stat.Mode().IsRegular() {
-		return nil, fmt.Errorf("encoded stream source is not a regular file")
+	return sections.Section(0, sections.size)
+}
+
+// FileSections borrows sections of one immutable regular file, so many encoded
+// streams share a single backing file. Like NewFileStreamSource, a section
+// opens the file only while a consumer reads it.
+type FileSections struct {
+	path string
+	size int64
+}
+
+// OpenFileSections inspects the file once for all of its sections.
+func OpenFileSections(path string) (FileSections, error) {
+	stat, err := os.Stat(path)
+	if err != nil {
+		return FileSections{}, err
 	}
-	return fileStreamSource{path: path, size: stat.Size()}, nil
+	if !stat.Mode().IsRegular() {
+		return FileSections{}, fmt.Errorf("encoded stream source is not a regular file")
+	}
+	return FileSections{path: path, size: stat.Size()}, nil
+}
+
+// Section returns the source of size bytes at offset.
+func (f FileSections) Section(offset, size int64) (EncodedStreamSource, error) {
+	if offset < 0 || size < 0 || offset > f.size-size {
+		return nil, fmt.Errorf("encoded stream section outside its file")
+	}
+	return fileStreamSource{path: f.path, offset: offset, size: size, fileSize: f.size}, nil
 }
 
 func (s fileStreamSource) Size() int64 { return s.size }
@@ -53,13 +82,21 @@ func (s fileStreamSource) Open() (io.ReadCloser, error) {
 		return nil, err
 	}
 	stat, err := file.Stat()
-	if err != nil || stat.Size() != s.size {
+	if err != nil || stat.Size() != s.fileSize {
 		if err == nil {
 			err = fmt.Errorf("encoded stream source length changed")
 		}
 		return nil, errors.Join(err, file.Close())
 	}
-	return file, nil
+	if s.offset == 0 && s.size == s.fileSize {
+		return file, nil
+	}
+	return sectionReadCloser{SectionReader: io.NewSectionReader(file, s.offset, s.size), Closer: file}, nil
+}
+
+type sectionReadCloser struct {
+	*io.SectionReader
+	io.Closer
 }
 
 // SetRawSource replaces the encoded representation without retaining a byte

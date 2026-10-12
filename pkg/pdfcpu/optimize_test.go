@@ -318,7 +318,7 @@ func TestOptimizeSMaskResourcesSkipsUnclassifiableXObject(t *testing.T) {
 		"G": *ir,
 	}
 
-	if err := optimizeSMaskResources(t.Context(), sMask, nil, "", ctx, types.Dict{}, 0, types.IntSet{}, 1); err != nil {
+	if err := optimizeSMaskResources(t.Context(), sMask, visitedRefs{}, "", ctx, types.Dict{}, 0, types.IntSet{}, 1); err != nil {
 		t.Fatal(err)
 	}
 	if len(ctx.Optimize.ImageObjects) != 0 {

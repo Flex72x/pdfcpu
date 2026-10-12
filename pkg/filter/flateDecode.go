@@ -17,6 +17,7 @@ limitations under the License.
 package filter
 
 import (
+	"bufio"
 	"bytes"
 	stdflate "compress/flate"
 	"compress/zlib"
@@ -107,7 +108,10 @@ func (r *zlibErrorTrackingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func acquireZlibWriter(w io.Writer) *zlib.Writer {
+// AcquireZlibWriter returns a default-level zlib writer from the shared pool.
+// Each new writer allocates about 1 MiB of compressor state, so callers that
+// encode many streams release it with ReleaseZlibWriter.
+func AcquireZlibWriter(w io.Writer) *zlib.Writer {
 	if v := zlibWriterPool.Get(); v != nil {
 		zw := v.(*zlib.Writer)
 		zw.Reset(w)
@@ -116,7 +120,8 @@ func acquireZlibWriter(w io.Writer) *zlib.Writer {
 	return zlib.NewWriter(w)
 }
 
-func releaseZlibWriter(w *zlib.Writer, reusable bool) error {
+// ReleaseZlibWriter closes w and pools it when reusable and closing succeeded.
+func ReleaseZlibWriter(w *zlib.Writer, reusable bool) error {
 	err := w.Close()
 	if reusable && err == nil {
 		zlibWriterPool.Put(w)
@@ -124,18 +129,37 @@ func releaseZlibWriter(w *zlib.Writer, reusable bool) error {
 	return err
 }
 
-func acquireZlibReader(r io.Reader) (zlibReadResetCloser, error) {
-	if v := zlibReaderPool.Get(); v != nil {
-		rc := v.(zlibReadResetCloser)
-		if err := rc.Reset(r, nil); err != nil {
-			_ = rc.Close()
+// ZlibReader is a pooled zlib decoder. It owns the byte reader compress/flate
+// requires, which flate would otherwise allocate (4 KiB) for every stream.
+type ZlibReader struct {
+	zr zlibReadResetCloser
+	br *bufio.Reader
+}
+
+func (z *ZlibReader) Read(p []byte) (int, error) { return z.zr.Read(p) }
+
+// AcquireZlibReader returns a pooled zlib decoder reading r. Release it with
+// ReleaseZlibReader.
+func AcquireZlibReader(r io.Reader) (*ZlibReader, error) {
+	z, _ := zlibReaderPool.Get().(*ZlibReader)
+	if z == nil {
+		z = &ZlibReader{br: bufio.NewReader(nil)}
+	}
+	source := r
+	if _, ok := r.(io.ByteReader); !ok {
+		z.br.Reset(r)
+		source = z.br
+	}
+	if z.zr != nil {
+		if err := z.zr.Reset(source, nil); err != nil {
+			z.br.Reset(nil)
 			return nil, err
 		}
-		return rc, nil
+		return z, nil
 	}
-
-	rc, err := zlib.NewReader(r)
+	rc, err := zlib.NewReader(source)
 	if err != nil {
+		z.br.Reset(nil)
 		return nil, err
 	}
 	rrc, ok := rc.(zlibReadResetCloser)
@@ -143,14 +167,18 @@ func acquireZlibReader(r io.Reader) (zlibReadResetCloser, error) {
 		_ = rc.Close()
 		return nil, errors.New("flate decode: zlib reader does not support reset")
 	}
-	return rrc, nil
+	z.zr = rrc
+	return z, nil
 }
 
-func releaseZlibReader(r zlibReadResetCloser, reusable bool) {
-	err := r.Close()
+// ReleaseZlibReader closes z and pools it when reusable and closing succeeded.
+func ReleaseZlibReader(z *ZlibReader, reusable bool) error {
+	err := z.zr.Close()
+	z.br.Reset(nil)
 	if reusable && err == nil {
-		zlibReaderPool.Put(r)
+		zlibReaderPool.Put(z)
 	}
+	return err
 }
 
 // IsCorruptFlateInput reports whether err contains a Flate corrupt-input error.
@@ -168,14 +196,14 @@ func (f flate) Encode(r io.Reader) (io.Reader, error) {
 	// TODO Optional decode parameters may need predictor preprocessing.
 
 	var b bytes.Buffer
-	w := acquireZlibWriter(&b)
+	w := AcquireZlibWriter(&b)
 
 	written, err := io.Copy(w, r)
 	if err != nil {
-		_ = releaseZlibWriter(w, false)
+		_ = ReleaseZlibWriter(w, false)
 		return nil, err
 	}
-	if err := releaseZlibWriter(w, true); err != nil {
+	if err := ReleaseZlibWriter(w, true); err != nil {
 		return nil, err
 	}
 
@@ -197,7 +225,7 @@ func (f flate) DecodeLength(r io.Reader, maxLen int64) (io.Reader, error) {
 		log.Trace.Println("DecodeFlate begin")
 	}
 
-	rc, err := acquireZlibReader(r)
+	rc, err := AcquireZlibReader(r)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +233,7 @@ func (f flate) DecodeLength(r io.Reader, maxLen int64) (io.Reader, error) {
 	// Optional decode parameters need postprocessing.
 	tr := zlibErrorTrackingReader{r: rc}
 	out, err := f.decodePostProcess(&tr, maxLen)
-	releaseZlibReader(rc, err == nil && tr.err == nil)
+	_ = ReleaseZlibReader(rc, err == nil && tr.err == nil)
 	return out, err
 }
 

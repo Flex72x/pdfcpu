@@ -81,15 +81,15 @@ func CreatePNGImageStreamDictFromFile(c context.Context, xref *XRefTable, input,
 	if err != nil {
 		return nil, err
 	}
-	colorWriter := zlib.NewWriter(contextutil.Writer(c, colorFile))
+	colorWriter := filter.AcquireZlibWriter(contextutil.Writer(c, colorFile))
 	var maskFile *os.File
 	var maskWriter *zlib.Writer
 	if alpha {
 		maskFile, err = os.CreateTemp(directory, "png-alpha-*.flate")
 		if err != nil {
-			return nil, errors.Join(err, colorWriter.Close(), colorFile.Close(), os.Remove(colorFile.Name()))
+			return nil, errors.Join(err, filter.ReleaseZlibWriter(colorWriter, false), colorFile.Close(), os.Remove(colorFile.Name()))
 		}
-		maskWriter = zlib.NewWriter(contextutil.Writer(c, maskFile))
+		maskWriter = filter.AcquireZlibWriter(contextutil.Writer(c, maskFile))
 	}
 	defer func() {
 		if err != nil {
@@ -130,9 +130,9 @@ func CreatePNGImageStreamDictFromFile(c context.Context, xref *XRefTable, input,
 		}
 		return rowErr
 	})
-	err = errors.Join(err, colorWriter.Close(), colorFile.Close())
+	err = errors.Join(err, filter.ReleaseZlibWriter(colorWriter, err == nil), colorFile.Close())
 	if maskFile != nil {
-		err = errors.Join(err, maskWriter.Close(), maskFile.Close())
+		err = errors.Join(err, filter.ReleaseZlibWriter(maskWriter, err == nil), maskFile.Close())
 	}
 	if err != nil {
 		return nil, err
@@ -311,11 +311,11 @@ func (p *pngFileRows) each(c context.Context, visit func(image.Image) error) (er
 		_, offset, length := original.Outer()
 		readers[i] = io.NewSectionReader(p.file, offset, length)
 	}
-	decoder, err := zlib.NewReader(contextutil.Reader(c, io.MultiReader(readers...)))
+	decoder, err := filter.AcquireZlibReader(contextutil.Reader(c, io.MultiReader(readers...)))
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, decoder.Close()) }()
+	defer func() { err = errors.Join(err, filter.ReleaseZlibReader(decoder, err == nil)) }()
 	rowBytes := (p.width*p.channels*p.depth + 7) / 8
 	row, previous := make([]byte, rowBytes+1), make([]byte, rowBytes)
 	stride := max(1, (p.channels*p.depth+7)/8)
