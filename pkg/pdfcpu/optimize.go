@@ -34,6 +34,14 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
+func keptObjectIndRef(ctx *model.Context, objNr int) *types.IndirectRef {
+	generation := 0
+	if entry, found := ctx.FindTableEntryLight(objNr); found && entry != nil && entry.Generation != nil {
+		generation = *entry.Generation
+	}
+	return types.NewIndirectRef(objNr, generation)
+}
+
 func optimizeContentStreamUsage(c context.Context, ctx *model.Context, sd *types.StreamDict, objNr int) (*types.IndirectRef, error) {
 	f := ctx.Optimize.ContentStreamCache
 	if len(f) == 0 {
@@ -56,14 +64,14 @@ func optimizeContentStreamUsage(c context.Context, ctx *model.Context, sd *types
 		return nil, nil
 	}
 
-	for _, objNr := range cachedObjNrs {
-		sd1 := f[objNr]
-		equal, err := sd.EqualRaw(c, *sd1)
+	for _, cachedObjNr := range cachedObjNrs {
+		sd1 := f[cachedObjNr]
+		equal, err := model.EqualObjects(c, *sd, *sd1, ctx.XRefTable, nil)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("compare content stream obj#%d with obj#%d: %w", objNr, cachedObjNr, err)
 		}
 		if equal {
-			ir := types.NewIndirectRef(objNr, 0)
+			ir := keptObjectIndRef(ctx, cachedObjNr)
 			ctx.IncrementRefCount(ir)
 			return ir, nil
 		}
@@ -441,7 +449,7 @@ func optimizeFontResourcesDict(c context.Context, ctx *model.Context, rDict type
 		if originalObjNr != nil {
 			// We have identified a redundant fontDict!
 			// Update font resource dict so that rName points to the original.
-			ir := types.NewIndirectRef(*originalObjNr, 0)
+			ir := keptObjectIndRef(ctx, *originalObjNr)
 			rDict[rName] = *ir
 			ctx.IncrementRefCount(ir)
 			if log.OptimizeEnabled() {
@@ -640,7 +648,7 @@ func optimizeXObjectImage(c context.Context, ctx *model.Context, osd *types.Stre
 	if originalObjNr != nil {
 		// We have identified a redundant image!
 		// Update xobject resource dict so that rName points to the original.
-		ir := types.NewIndirectRef(*originalObjNr, 0)
+		ir := keptObjectIndRef(ctx, *originalObjNr)
 		ctx.IncrementRefCount(ir)
 		rDict[rName] = *ir
 		if log.OptimizeEnabled() {
@@ -691,7 +699,7 @@ func optimizeXObjectForm(c context.Context, ctx *model.Context, sd *types.Stream
 			return nil, fmt.Errorf("compare form XObject obj#%d with obj#%d: %w", objNr, objNr1, err)
 		}
 		if ok {
-			ir := types.NewIndirectRef(objNr1, 0)
+			ir := keptObjectIndRef(ctx, objNr1)
 			ctx.IncrementRefCount(ir)
 			return ir, nil
 		}
@@ -1365,7 +1373,7 @@ func fixCorruptFontResDicts(ctx *model.Context) error {
 
 					if strings.HasPrefix(fn, "Arial") && (len(fn) == 5 || fn[5] != '-') {
 						model.ShowRepaired(fmt.Sprintf("font %s mapped to objNr %d", k, objNrs[0]))
-						d[k] = *types.NewIndirectRef(objNrs[0], 0)
+						d[k] = *keptObjectIndRef(ctx, objNrs[0])
 						break
 					}
 				}

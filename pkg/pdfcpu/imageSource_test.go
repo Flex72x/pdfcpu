@@ -271,6 +271,9 @@ func TestImageSourceRasterLZWRunLengthAndIndirectDimensions(t *testing.T) {
 }
 
 func TestImageSourceRecoveryClassification(t *testing.T) {
+	if !IsStructuralReadError(fmt.Errorf("wrapped: %w", errCircularObjectReference)) {
+		t.Fatal("circular stream references must be classified as structural input damage")
+	}
 	if !IsStructuralReadError(fmt.Errorf("wrapped: %w", ErrMissingXRefSection)) {
 		t.Fatal("structural damage lost")
 	}

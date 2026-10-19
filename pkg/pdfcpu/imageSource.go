@@ -541,7 +541,7 @@ func sourceJ2KHeader(source *ImageSource, data []byte) error {
 // boundaries. Image decode failures, cancellation and operational errors are
 // deliberately excluded; callers must not send them to structural recovery.
 func IsStructuralReadError(err error) bool {
-	for _, candidate := range []error{ErrCorruptHeader, ErrMissingXRefSection, errCorruptDictObject, errCorruptObjectStream, errCorruptObjectStreamDict, errCorruptStreamDict, errCorruptStreamMarker, errCorruptTrailerDict, errCorruptXRefStream, errIncompleteXRefSubsection, errInvalidLastXRefSection, errMissingObjectStream, errMissingObjectStreamEntry, errMissingObjectStreamObjects, errMissingStreamLength, errMissingStreamOffset, errMissingTrailerDict, errMissingTrailerRoot, errMissingTrailerSize, errMissingXRefEOF, errMissingXRefStreamDict, errMissingXRefStreamLength, errTruncatedStreamMarker} {
+	for _, candidate := range []error{errCircularObjectReference, ErrCorruptHeader, ErrMissingXRefSection, errCorruptDictObject, errCorruptObjectStream, errCorruptObjectStreamDict, errCorruptStreamDict, errCorruptStreamMarker, errCorruptTrailerDict, errCorruptXRefStream, errIncompleteXRefSubsection, errInvalidLastXRefSection, errMissingObjectStream, errMissingObjectStreamEntry, errMissingObjectStreamObjects, errMissingStreamLength, errMissingStreamOffset, errMissingTrailerDict, errMissingTrailerRoot, errMissingTrailerSize, errMissingXRefEOF, errMissingXRefStreamDict, errMissingXRefStreamLength, errTruncatedStreamMarker} {
 		if errors.Is(err, candidate) {
 			return true
 		}

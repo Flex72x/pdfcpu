@@ -152,7 +152,7 @@ func trimLeftSpace(s string, relaxed bool) (string, bool) {
 	return s, eol
 }
 
-// HexString validates and formats a hex string to be of even length.
+// hexString validates and formats a hex string to be of even length.
 func hexString(s string) (*string, bool) {
 	if len(s) == 0 {
 		s1 := ""
@@ -163,11 +163,8 @@ func hexString(s string) (*string, bool) {
 	i := 0
 
 	for _, c := range strings.ToUpper(s) {
-		if strings.ContainsRune(" \x09\x0A\x0C\x0D", c) {
-			if i%2 > 0 {
-				sb.WriteString("0")
-				i = 0
-			}
+		if strings.ContainsRune("\x00\x09\x0A\x0C\x0D ", c) {
+			// Ignore whitespace within digit pairs (PDF 2.0, 7.3.4.3).
 			continue
 		}
 		isHexChar := false
@@ -270,8 +267,12 @@ func cleanObjProlog(s string) (string, error) {
 
 	var b strings.Builder
 	for _, r := range s {
-		if r >= '0' && r <= '9' || r == ' ' {
+		switch {
+		case r >= '0' && r <= '9' || r == ' ':
 			b.WriteRune(r)
+		case r == 0x00 || r == '\t' || r == '\n' || r == '\f' || r == '\r':
+			// Preserve PDF whitespace as a separator between numbers (7.2.3).
+			b.WriteRune(' ')
 		}
 	}
 	return b.String(), nil
@@ -1355,8 +1356,8 @@ func detectMarker(line, marker string) int {
 		line = line[off:]
 		if marker == "endobj" {
 			j := strings.Index(line, "xref")
-			if j >= 0 {
-				r := rune(line[j+4])
+			if j >= 0 && j+len("xref") < len(line) {
+				r := rune(line[j+len("xref")])
 				if isMarkerTerminated(r) {
 					return ind
 				}
@@ -1376,13 +1377,16 @@ func detectMarker(line, marker string) int {
 	return ind
 }
 
+// posUnsearched distinguishes a position needing a new search from a valid marker at byte zero.
+const posUnsearched = -2
+
 func detectMarkers(line string, endInd, streamInd *int) {
 	//fmt.Printf("buflen=%d\n%s", len(line), hex.Dump([]byte(line)))
-	if *endInd == 0 {
+	if *endInd == posUnsearched {
 		*endInd = detectMarker(line, "endobj")
 
 	}
-	if *streamInd == 0 {
+	if *streamInd == posUnsearched {
 		*streamInd = detectMarker(line, "stream")
 	}
 }
@@ -1411,33 +1415,6 @@ func posFloor(pos1, pos2 int) int {
 	return pos2
 }
 
-func detectNonEscaped(line, s string) int {
-	var ind int
-	for {
-		i := strings.Index(line, s)
-		if i < 0 {
-			// did not find s
-			return -1
-		}
-		if i == 0 {
-			// found s at pos 0
-			return ind
-		}
-		if line[i-1] != 0x5c {
-			// found s at pos i
-			return ind + i
-		}
-		// found escaped s
-		if i == len(line)-1 {
-			// last is escaped s -> did not find s
-			return -1
-		}
-		// moving on after escaped s
-		line = line[i+1:]
-		ind += i + 1
-	}
-}
-
 func applyOffBoth(endInd, streamInd, off int) (int, int, error) {
 	if endInd >= 0 {
 		endInd += off
@@ -1450,7 +1427,7 @@ func applyOffBoth(endInd, streamInd, off int) (int, int, error) {
 
 func applyOffEndIndFirst(endInd, streamInd, off, floor int) (int, int, error) {
 	endInd += off
-	if streamInd > 0 {
+	if streamInd >= 0 {
 		if streamInd > floor {
 			// stream after any ( or % to skip
 			streamInd = -1
@@ -1463,7 +1440,7 @@ func applyOffEndIndFirst(endInd, streamInd, off, floor int) (int, int, error) {
 
 func applyOffStreamIndFirst(endInd, streamInd, off, floor int) (int, int, error) {
 	streamInd += off
-	if endInd > 0 {
+	if endInd >= 0 {
 		if endInd > floor {
 			// endobj after any ( or % to skip
 			endInd = -1
@@ -1481,21 +1458,27 @@ func isComment(commentPos, strLitPos int) bool {
 func skipComment(line string, commentPos int, off, endInd, streamInd *int) string {
 	l, i := positionToNextEOL(line[commentPos:])
 	if l == "" {
+		if *endInd >= commentPos {
+			*endInd = -1
+		}
+		if *streamInd >= commentPos {
+			*streamInd = -1
+		}
 		return l
 	}
 	delta := commentPos + i
 	*off += delta
 
 	// Adjust found positions for changed line.
-	if *endInd > delta {
+	if *endInd >= delta {
 		*endInd -= delta
 	} else if *endInd != -1 {
-		*endInd = 0
+		*endInd = posUnsearched
 	}
-	if *streamInd > delta {
+	if *streamInd >= delta {
 		*streamInd -= delta
 	} else if *streamInd != -1 {
-		*streamInd = 0
+		*streamInd = posUnsearched
 	}
 	return l
 }
@@ -1508,15 +1491,15 @@ func skipStringLit(line string, strLitPos int, off, endInd, streamInd *int) (str
 	delta := strLitPos + i
 	*off += delta
 	// Adjust found positions for changed line.
-	if *endInd > delta {
+	if *endInd >= delta {
 		*endInd -= delta
 	} else if *endInd != -1 {
-		*endInd = 0
+		*endInd = posUnsearched
 	}
-	if *streamInd > delta {
+	if *streamInd >= delta {
 		*streamInd -= delta
 	} else if *streamInd != -1 {
-		*streamInd = 0
+		*streamInd = posUnsearched
 	}
 	return l, nil
 }
@@ -1533,6 +1516,19 @@ func skipCommentOrStringLiteral(line string, commentPos, slPos int, off, endInd,
 	return skipStringLit(line, slPos, off, endInd, streamInd)
 }
 
+func rebaseDelimiterPos(pos, delta int, empty bool) int {
+	if empty {
+		return -1
+	}
+	if pos < 0 {
+		return pos
+	}
+	if pos >= delta {
+		return pos - delta
+	}
+	return posUnsearched
+}
+
 // DetectKeywords detects endobj and stream keywords in line using c for cancellation.
 func DetectKeywords(c context.Context, line string) (endInd int, streamInd int, err error) {
 	if c == nil {
@@ -1544,7 +1540,8 @@ func DetectKeywords(c context.Context, line string) (endInd int, streamInd int, 
 func detectKeywords(c context.Context, line string) (endInd int, streamInd int, err error) {
 	// return endInd or streamInd which ever first encountered.
 	off := 0
-	strLitPos, commentPos := 0, 0
+	strLitPos, commentPos := posUnsearched, posUnsearched
+	endInd, streamInd = posUnsearched, posUnsearched
 	for {
 		if err := c.Err(); err != nil {
 			return -1, -1, err
@@ -1556,12 +1553,12 @@ func detectKeywords(c context.Context, line string) (endInd int, streamInd int, 
 			return -1, -1, nil
 		}
 
-		// Don't re-search in partial line if known to be not present.
-		if strLitPos != -1 {
-			strLitPos = detectNonEscaped(line, "(")
+		// Outside literal strings, backslashes do not escape delimiters.
+		if strLitPos == posUnsearched {
+			strLitPos = strings.IndexByte(line, '(')
 		}
-		if commentPos != -1 {
-			commentPos = detectNonEscaped(line, "%")
+		if commentPos == posUnsearched {
+			commentPos = strings.IndexByte(line, '%')
 		}
 
 		if strLitPos < 0 && commentPos < 0 {
@@ -1571,23 +1568,27 @@ func detectKeywords(c context.Context, line string) (endInd int, streamInd int, 
 
 		floor := posFloor(strLitPos, commentPos)
 
-		if endInd > 0 {
+		if endInd >= 0 {
 			if endInd < floor {
 				// endobj before any ( or % to skip
 				return applyOffEndIndFirst(endInd, streamInd, off, floor)
 			}
 		}
 
-		if streamInd > 0 {
+		if streamInd >= 0 {
 			if streamInd < floor {
 				// stream before any ( or % to skip
 				return applyOffStreamIndFirst(endInd, streamInd, off, floor)
 			}
 		}
 
+		prevOff := off
 		line, err = skipCommentOrStringLiteral(line, commentPos, strLitPos, &off, &endInd, &streamInd)
 		if err != nil {
 			return -1, -1, err
 		}
+		delta := off - prevOff
+		strLitPos = rebaseDelimiterPos(strLitPos, delta, line == "")
+		commentPos = rebaseDelimiterPos(commentPos, delta, line == "")
 	}
 }

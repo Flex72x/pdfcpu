@@ -50,12 +50,14 @@ func skipDict(l *string) error {
 	s = s[2:]
 	depth := 1
 	for depth > 0 {
-		i := strings.IndexAny(s, "<>(")
+		i := strings.IndexAny(s, "<>(%")
 		if i < 0 {
 			return ErrDictionaryCorrupt
 		}
 		s = s[i:]
 		switch {
+		case s[0] == '%':
+			s, _ = positionToNextEOL(s)
 		case strings.HasPrefix(s, "<<"):
 			depth++
 			s = s[2:]
@@ -166,17 +168,58 @@ func lookupEI(l *string) (int, error) {
 	return 0, errBIExpressionCorrupt
 }
 
+func contentResourceName(name string) string {
+	decoded, err := types.DecodeName(name)
+	if err != nil {
+		return name
+	}
+	return decoded
+}
+
+func skipBIColorSpaceArray(s string, prn PageResourceNames) (string, error) {
+	s = s[1:]
+	for {
+		s, _ = trimLeftSpace(s, false)
+		if len(s) == 0 {
+			return "", errBIExpressionCorrupt
+		}
+		var err error
+		switch s[0] {
+		case ']':
+			return s[1:], nil
+		case '(':
+			err = skipStringLiteral(&s)
+		case '<':
+			err = skipHexStringLiteral(&s)
+		case '/':
+			s, err = skipBIColorSpaceName(s, prn)
+		default:
+			index, _ := positionToNextWhitespaceOrChar(s, "/[]<>()%")
+			if index <= 0 {
+				return "", errBIExpressionCorrupt
+			}
+			s = s[index:]
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+}
+
 func skipBIColorSpaceName(s string, prn PageResourceNames) (string, error) {
 	s, _ = trimLeftSpace(s, false)
+	if strings.HasPrefix(s, "[") {
+		return skipBIColorSpaceArray(s, prn)
+	}
 	if len(s) < 2 || s[0] != '/' {
 		return "", errBIExpressionCorrupt
 	}
 	s = s[1:]
-	i, _ := positionToNextWhitespaceOrChar(s, "/")
+	i, _ := positionToNextWhitespaceOrChar(s, "/[]<>()%")
 	if i < 0 {
 		return "", errBIExpressionCorrupt
 	}
-	name := s[:i]
+	name := contentResourceName(s[:i])
 	if !types.MemberOf(name, []string{"DeviceGray", "DeviceRGB", "DeviceCMYK", "Indexed", "G", "RGB", "CMYK", "I"}) {
 		prn["ColorSpace"][name] = true
 	}
@@ -327,7 +370,7 @@ func nextContentToken(pre string, line *string, prn PageResourceNames) (string, 
 		l1 = l1[i:]
 		l1 = strings.TrimLeftFunc(l1, whitespaceOrEOL)
 		if !strings.HasPrefix(l1, "<<") {
-			t = "/" + t
+			t = "/" + contentResourceName(t)
 			*line = l1
 			return t, nil
 		}

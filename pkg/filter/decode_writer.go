@@ -74,7 +74,7 @@ func (f flate) decodeTo(source io.Reader, destination io.Writer) (total int64, e
 		if n != rowLen {
 			return total, fmt.Errorf("flate decode: read error, expected %d bytes, got: %d", rowLen, n)
 		}
-		decoded, e := processRow(previous, current, predictor, colors, stride)
+		decoded, e := processRow(previous, current, predictor, colors, bpc, columns, stride)
 		if e != nil {
 			return total, e
 		}

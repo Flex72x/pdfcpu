@@ -2051,9 +2051,11 @@ func (xRefTable *XRefTable) consolidateResources(obj types.Object, pAttrs *Inher
 		if err != nil {
 			return fmt.Errorf("resource %s: %w", key, err)
 		}
-		if object != nil {
-			pAttrs.Resources[key] = object.Clone()
+		if object == nil {
+			delete(pAttrs.Resources, key)
+			continue
 		}
+		pAttrs.Resources[key] = object.Clone()
 	}
 
 	return nil
@@ -2234,8 +2236,16 @@ func (xRefTable *XRefTable) pageContent(c context.Context, d types.Dict, pageNr 
 }
 
 func (xRefTable *XRefTable) consolidateResourceSubDict(d types.Dict, key string, prn PageResourceNames, pageNr int) error {
-	o := d[key]
-	if o == nil {
+	if !prn.HasResources(key) && key != "ColorSpace" {
+		d.Delete(key)
+		return nil
+	}
+	d1, err := xRefTable.DereferenceDict(d[key])
+	if err != nil {
+		return fmt.Errorf("page %d: resource %s: %w", pageNr, key, err)
+	}
+	if d1 == nil {
+		d.Delete(key)
 		if prn.HasResources(key) {
 			resources := make([]string, 0, len(prn.Resources(key)))
 			for resourceName := range prn.Resources(key) {
@@ -2253,14 +2263,6 @@ func (xRefTable *XRefTable) consolidateResourceSubDict(d types.Dict, key string,
 			ShowSkipped(fmt.Sprintf("page %d: %s", pageNr, s))
 		}
 		return nil
-	}
-	if !prn.HasResources(key) && key != "ColorSpace" {
-		d.Delete(key)
-		return nil
-	}
-	d1, ok := o.(types.Dict)
-	if !ok {
-		return fmt.Errorf("page %d: %s resource entry must be a dictionary", pageNr, key)
 	}
 	set := types.StringSet{}
 	res := prn.Resources(key)
@@ -3522,14 +3524,30 @@ func weaveInPage(c context.Context, ctx *Context, parent types.IndirectRef, page
 	if err != nil {
 		return nil, err
 	}
+	materializeInheritedPageAttrs(d1, inhPAttrs)
 	d1["Parent"] = parent
-	if _, found := d1["Rotate"]; !found {
-		d1["Rotate"] = types.Integer(inhPAttrs.Rotate)
-	}
-	if _, found := d1["MediaBox"]; !found {
-		d1["MediaBox"] = inhPAttrs.MediaBox.Array()
-	}
 	return indRef, nil
+}
+
+// materializeInheritedPageAttrs preserves effective attributes before a page acquires new ancestors.
+// See PDF 2.0, 7.7.3.4 and Table 31.
+func materializeInheritedPageAttrs(d types.Dict, attrs *InheritedPageAttrs) {
+	if _, found := d["Rotate"]; !found {
+		d["Rotate"] = types.Integer(attrs.Rotate)
+	}
+	if _, found := d["MediaBox"]; !found {
+		d["MediaBox"] = attrs.MediaBox.Array()
+	}
+	if _, found := d["CropBox"]; !found {
+		crop := attrs.CropBox
+		if crop == nil {
+			crop = attrs.MediaBox
+		}
+		d["CropBox"] = crop.Array()
+	}
+	if _, found := d["Resources"]; !found && attrs.Resources != nil {
+		d["Resources"] = attrs.Resources.Clone()
+	}
 }
 
 // Weave in ctx's pages: for each page weave in the corresponding ctx page as long as there is one.
@@ -3667,13 +3685,8 @@ func (xRefTable *XRefTable) AppendPages(c context.Context, rootPageIndRef *types
 		if err != nil {
 			return 0, err
 		}
+		materializeInheritedPageAttrs(d, inhPAttrs)
 		d["Parent"] = *indRef1
-		if _, found := d["Rotate"]; !found {
-			d["Rotate"] = types.Integer(inhPAttrs.Rotate)
-		}
-		if _, found := d["MediaBox"]; !found {
-			d["MediaBox"] = inhPAttrs.MediaBox.Array()
-		}
 		kids1 = append(kids1, *indRef2)
 	}
 	d1["Kids"] = kids1

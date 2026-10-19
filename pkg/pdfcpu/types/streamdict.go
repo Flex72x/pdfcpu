@@ -252,6 +252,14 @@ func parmsForFilter(d Dict) map[string]int {
 	return m
 }
 
+func (sd *StreamDict) nonCryptFilters() []PDFFilter {
+	filters := sd.FilterPipeline
+	if len(filters) > 0 && filters[0].Name == "Crypt" {
+		return filters[1:]
+	}
+	return filters
+}
+
 // Encode applies sd's filter pipeline to sd.Content in order to produce sd.Raw.
 func (sd *StreamDict) Encode() error {
 	if sd.Content == nil && (sd.Raw != nil || sd.RawSource != nil) {
@@ -261,7 +269,8 @@ func (sd *StreamDict) Encode() error {
 
 	sd.RawSource = nil
 	// No filter specified, nothing to encode.
-	if len(sd.FilterPipeline) == 0 {
+	filters := sd.nonCryptFilters()
+	if len(filters) == 0 {
 		if log.TraceEnabled() {
 			log.Trace.Println("encodeStream: returning uncompressed stream.")
 		}
@@ -277,8 +286,8 @@ func (sd *StreamDict) Encode() error {
 
 	// Apply each filter in the pipeline to result of preceding filter.
 
-	for i := len(sd.FilterPipeline) - 1; i >= 0; i-- {
-		f := sd.FilterPipeline[i]
+	for i := len(filters) - 1; i >= 0; i-- {
+		f := filters[i]
 		if log.TraceEnabled() {
 			if f.DecodeParms != nil {
 				log.Trace.Printf("encodeStream: encoding filter:%s\ndecodeParms:%s\n", f.Name, f.DecodeParms)
@@ -379,10 +388,11 @@ func (sd *StreamDict) decodeLength(maxLen, maxDecodeBytes int64) (_ []byte, err 
 	b = raw
 
 	// Apply each filter in the pipeline to result of preceding filter.
-	for idx, f := range sd.FilterPipeline {
+	filters := sd.nonCryptFilters()
+	for idx, f := range filters {
 
 		if preserveEncodedImageFilter(f.Name) {
-			if idx != len(sd.FilterPipeline)-1 {
+			if idx != len(filters)-1 {
 				return nil, fmt.Errorf("stream filter[%d] %q: decode: %w", idx, f.Name, filter.ErrUnsupportedFilter)
 			}
 			c = b
@@ -416,7 +426,7 @@ func (sd *StreamDict) decodeLength(maxLen, maxDecodeBytes int64) (_ []byte, err 
 			return nil, fmt.Errorf("stream filter[%d] %q: construct: %w", idx, f.Name, err)
 		}
 
-		if maxLen >= 0 && idx == len(sd.FilterPipeline)-1 {
+		if maxLen >= 0 && idx == len(filters)-1 {
 			c, err = fi.DecodeLength(b, maxLen)
 		} else {
 			c, err = fi.Decode(b)
@@ -452,6 +462,13 @@ func (sd *StreamDict) DecodeLength(maxLen int64) ([]byte, error) {
 
 // DecodeLengthWithLimit decodes sd with a maximum output length and resource limits.
 func (sd *StreamDict) DecodeLengthWithLimit(maxLen, maxDecodeBytes int64) ([]byte, error) {
+	limit := maxDecodeBytes
+	if limit == 0 {
+		limit = filter.DefaultMaxDecodeBytes
+	}
+	if maxLen >= 0 && limit >= 0 && maxLen > limit {
+		return nil, filter.ErrDecodeLimitExceeded
+	}
 	if sd.Content != nil {
 		// This stream has already been decoded.
 		if maxLen < 0 {
@@ -464,11 +481,11 @@ func (sd *StreamDict) DecodeLengthWithLimit(maxLen, maxDecodeBytes int64) ([]byt
 		return sd.Content[:maxLen], nil
 	}
 
-	fpl := sd.FilterPipeline
+	fpl := sd.nonCryptFilters()
 
 	// No filter, sole DCT except CMYK, or terminal opaque image filters:
 	// nothing to decode for consumers that can preserve the original image stream.
-	if fpl == nil || len(fpl) == 1 && ((fpl[0].Name == filter.DCT && sd.CSComponents != 4) || preserveEncodedImageFilter(fpl[0].Name)) {
+	if len(fpl) == 0 || len(fpl) == 1 && ((fpl[0].Name == filter.DCT && sd.CSComponents != 4) || preserveEncodedImageFilter(fpl[0].Name)) {
 		var err error
 		sd.Content, err = sd.RawBytes(maxDecodeBytes)
 		if err != nil {

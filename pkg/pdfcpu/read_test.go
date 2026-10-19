@@ -214,6 +214,7 @@ func TestOffsetLastXRefSectionPreservesReadError(t *testing.T) {
 	}
 }
 
+// TestProcessObjectSkipsBoundedMalformedObjectRelaxed checks the offset and state after a relaxed skip.
 func TestProcessObjectSkipsBoundedMalformedObjectRelaxed(t *testing.T) {
 	input := "1 0 obj\n<</D[0/a0 obj\n<</E 1>>\nendobj\n2 0 obj\nnull\nendobj\n"
 	ctx, err := model.NewContext(bytes.NewReader([]byte(input)), model.NewDefaultConfiguration())
@@ -222,12 +223,15 @@ func TestProcessObjectSkipsBoundedMalformedObjectRelaxed(t *testing.T) {
 	}
 
 	var offset int64
-	s, err := processObject(t.Context(), ctx, "1 0 obj", &offset, 1, nil)
+	s, withinObj, err := processObject(t.Context(), ctx, "1 0 obj", &offset, 1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if s == nil {
 		t.Fatal("missing scanner")
+	}
+	if withinObj {
+		t.Fatal("scanner remains inside the skipped object")
 	}
 	wantOffset := int64(strings.Index(input, "endobj") + len("endobj"))
 	if offset != wantOffset {
@@ -235,6 +239,7 @@ func TestProcessObjectSkipsBoundedMalformedObjectRelaxed(t *testing.T) {
 	}
 }
 
+// TestProcessObjectRejectsBoundedMalformedObjectStrict checks that strict parsing returns the malformed-object error.
 func TestProcessObjectRejectsBoundedMalformedObjectStrict(t *testing.T) {
 	input := "1 0 obj\n<</D[0/a0 obj\n<</E 1>>\nendobj\n"
 	conf := model.NewDefaultConfiguration()
@@ -245,7 +250,7 @@ func TestProcessObjectRejectsBoundedMalformedObjectStrict(t *testing.T) {
 	}
 
 	var offset int64
-	_, err = processObject(t.Context(), ctx, "1 0 obj", &offset, 1, nil)
+	_, _, err = processObject(t.Context(), ctx, "1 0 obj", &offset, 1, nil)
 	if err == nil || !strings.Contains(err.Error(), "unterminated array") {
 		t.Fatalf("got %v, want malformed object error", err)
 	}
@@ -464,6 +469,31 @@ func TestDereferencedObjectClassifiesUnregisteredObject(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "object 7") {
 		t.Fatalf("expected object context, got %q", err.Error())
+	}
+}
+
+// TestDereferencedObjectKeepsEndobjAfterLiteral covers keyword scanning through the indexed-object read path.
+func TestDereferencedObjectKeepsEndobjAfterLiteral(t *testing.T) {
+	input := "4 0 obj\n(abc)endobj\n5 0 obj\n<</T (def)/Length 3>>\nstream\nxyz\nendstream\nendobj\n"
+	ctx, err := model.NewContext(strings.NewReader(input), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offset, generation := int64(0), 0
+	ctx.Table[4] = &model.XRefTableEntry{Offset: &offset, Generation: &generation}
+	obj, err := dereferencedObject(t.Context(), ctx, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := obj.(types.StringLiteral); !ok || got != "abc" {
+		t.Fatalf("got %T %v, want string literal abc", obj, obj)
+	}
+	_, end, _, _, err := object(t.Context(), ctx, offset, 4, generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.Index(input, "endobj"); end != want {
+		t.Fatalf("endobj at %d, want %d", end, want)
 	}
 }
 
@@ -697,18 +727,213 @@ func TestParseObjectStreamClassifiesObjectCountLimit(t *testing.T) {
 	}
 }
 
-func TestDecodeObjectStreamClassifiesMissingEntry(t *testing.T) {
-	ctx, err := model.NewContext(bytes.NewReader(nil), nil)
+// TestDecodeObjectStreamRejectsInvalidEntries checks the entry before its offset and generation are dereferenced.
+func TestDecodeObjectStreamRejectsInvalidEntries(t *testing.T) {
+	offset, generation := int64(0), 0
+	tests := []struct {
+		name  string
+		entry *model.XRefTableEntry
+	}{
+		{"missing", nil},
+		{"empty", &model.XRefTableEntry{}},
+		{"compressed", &model.XRefTableEntry{Compressed: true}},
+		{"compressed with offset", &model.XRefTableEntry{Compressed: true, Offset: &offset, Generation: &generation}},
+		{"free", &model.XRefTableEntry{Free: true, Offset: &offset, Generation: &generation}},
+		{"missing offset", &model.XRefTableEntry{Generation: &generation}},
+		{"missing generation", &model.XRefTableEntry{Offset: &offset}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, err := model.NewContext(bytes.NewReader(nil), model.NewStatelessConfiguration())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.entry != nil {
+				ctx.Table[7] = tc.entry
+			}
+			err = decodeObjectStream(t.Context(), ctx, 7)
+			if !errors.Is(err, errMissingObjectStreamEntry) {
+				t.Fatalf("got %v, want %v", err, errMissingObjectStreamEntry)
+			}
+			if !strings.Contains(err.Error(), "object stream obj#7") {
+				t.Fatalf("expected object stream context, got %q", err.Error())
+			}
+		})
+	}
+}
+
+func invalidObjectStreamEntryPDF(version model.Version, free bool) []byte {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "%%PDF-%s\n", version)
+	offsets := make([]int, 7)
+	for i, body := range []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> >>",
+	} {
+		offsets[i+1] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, body)
+	}
+	offsets[6] = b.Len()
+	streamEntry := [3]int{2, 5, 0} // Object stream 5 incorrectly claims to live inside itself.
+	if free {
+		streamEntry = [3]int{0, 0, 0}
+	}
+	data := []byte{}
+	for _, row := range [][3]int{
+		{0, 0, 65535}, {1, offsets[1], 0}, {1, offsets[2], 0}, {1, offsets[3], 0},
+		{2, 5, 0}, streamEntry, {1, offsets[6], 0},
+	} {
+		data = append(data, byte(row[0]), byte(row[1]>>24), byte(row[1]>>16), byte(row[1]>>8), byte(row[1]),
+			byte(row[2]>>8), byte(row[2]))
+	}
+	fmt.Fprintf(&b, "6 0 obj\n<< /Type /XRef /Size 7 /W [1 4 2] /Root 1 0 R /Length %d >>\nstream\n", len(data))
+	b.Write(data)
+	fmt.Fprintf(&b, "\nendstream\nendobj\nstartxref\n%d\n%%%%EOF\n", offsets[6])
+	return b.Bytes()
+}
+
+// TestReadRejectsInvalidObjectStreamEntries verifies malformed cross-references return an error without panicking.
+func TestReadRejectsInvalidObjectStreamEntries(t *testing.T) {
+	for _, version := range []model.Version{model.V15, model.V17, model.V20} {
+		for _, mode := range []int{model.ValidationStrict, model.ValidationRelaxed} {
+			for _, free := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/mode%d/free=%t", version, mode, free), func(t *testing.T) {
+					conf := model.NewStatelessConfiguration()
+					conf.ValidationMode = mode
+					conf.Offline = true
+					_, err := Read(t.Context(), bytes.NewReader(invalidObjectStreamEntryPDF(version, free)), conf)
+					if !errors.Is(err, errMissingObjectStreamEntry) {
+						t.Fatalf("got %v, want %v", err, errMissingObjectStreamEntry)
+					}
+					if !strings.Contains(err.Error(), "object stream obj#5") {
+						t.Fatalf("expected object stream context, got %q", err.Error())
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestRepairScannersRespectObjectLimit checks registration, repair, and scanners resumed after parsing.
+func TestRepairScannersRespectObjectLimit(t *testing.T) {
+	for _, limit := range []int64{32, 64 << 10} {
+		for _, path := range []string{"register", "repair", "resume"} {
+			t.Run(fmt.Sprintf("%s/limit=%d", path, limit), func(t *testing.T) {
+				input := "1 0 obj true endobj\n" + strings.Repeat("x", int(limit)*2) + "\n"
+				conf := model.NewStatelessConfiguration()
+				conf.Limits.MaxObjectBytes = limit
+				ctx, err := model.NewContext(strings.NewReader(input), conf)
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch path {
+				case "register":
+					err = registerXRefObjects(ctx, 1)
+				case "repair":
+					err = bypassXrefSection(t.Context(), ctx, 0, nil, 1)
+				case "resume":
+					var offset int64
+					var scanner *bufio.Scanner
+					scanner, _, err = processObject(t.Context(), ctx, "1 0 obj", &offset, 1, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for scanner.Scan() {
+					}
+					err = scanner.Err()
+				}
+				if !errors.Is(err, bufio.ErrTooLong) {
+					t.Fatalf("got %v, want scanner buffer limit error", err)
+				}
+			})
+		}
+	}
+}
+
+// TestRepairScannerLimitBoundaries checks default selection, growth, and small buffer boundaries.
+func TestRepairScannerLimitBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		limit int64
+		size  int
+		fail  bool
+	}{
+		{"default", 0, 2 * defaultBufSize, false},
+		{"grow", 4 * defaultBufSize, 2 * defaultBufSize, false},
+		{"small fits", 32, 31, false},
+		{"small exceeds", 32, 32, true},
+		{"negative", -1, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := model.NewStatelessConfiguration()
+			conf.Limits.MaxObjectBytes = tc.limit
+			ctx, err := model.NewContext(strings.NewReader(""), conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := newRepairScanner(ctx, strings.NewReader(strings.Repeat("x", tc.size)+"\n"))
+			if s.Scan() == tc.fail {
+				t.Fatalf("scan result: err=%v, want failure=%t", s.Err(), tc.fail)
+			}
+			if tc.fail && !errors.Is(s.Err(), bufio.ErrTooLong) {
+				t.Fatalf("got %v, want scanner buffer limit error", s.Err())
+			}
+		})
+	}
+}
+
+// TestRepairKeepsObjectsAfterMalformedSkip checks consecutive skips and subsequent dictionaries and streams.
+func TestRepairKeepsObjectsAfterMalformedSkip(t *testing.T) {
+	bad := "1 0 obj\n<</A ]>>\nendobj\n"
+	stream := "4 0 obj\n<</Length 3>>\nstream\nabc\nendstream\nendobj\n"
+	for _, tc := range []struct {
+		name, objects string
+		stream        bool
+	}{
+		{"catalog", bad, false},
+		{"consecutive malformed", bad + "5 0 obj\n<</B ]>>\nendobj\n", false},
+		{"stream", bad + stream, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := "%PDF-1.4\n" + tc.objects +
+				"2 0 obj\n<</Type/Catalog/Pages 3 0 R>>\nendobj\n" +
+				"3 0 obj\n<</Type/Pages/Kids[]/Count 0>>\nendobj\n"
+			conf := model.NewStatelessConfiguration()
+			conf.ValidationMode = model.ValidationRelaxed
+			ctx, err := Read(t.Context(), strings.NewReader(input), conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ctx.Root == nil || ctx.Root.ObjectNumber.Value() != 2 {
+				t.Fatalf("root = %v, want 2 0 R", ctx.Root)
+			}
+			for _, objNr := range []int{2, 3} {
+				if e := ctx.Table[objNr]; e == nil || e.Object == nil {
+					t.Fatalf("obj#%d was lost", objNr)
+				}
+			}
+			if tc.stream {
+				sd, _, err := ctx.DereferenceStreamDict(*types.NewIndirectRef(4, 0))
+				if err != nil || sd == nil || sd.StreamLength == nil || string(sd.Raw) != "abc" {
+					t.Fatalf("stream after skipped object was not loaded: %v, %v", sd, err)
+				}
+			}
+		})
+	}
+}
+
+// TestProcessObjectResumesWithinValidObject checks the repair state after a successful parse.
+func TestProcessObjectResumesWithinValidObject(t *testing.T) {
+	input := "1 0 obj\ntrue\nendobj\n"
+	ctx, err := model.NewContext(strings.NewReader(input), model.NewStatelessConfiguration())
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	err = decodeObjectStream(t.Context(), ctx, 7)
-	if !errors.Is(err, errMissingObjectStreamEntry) {
-		t.Fatalf("got %v, want %v", err, errMissingObjectStreamEntry)
-	}
-	if !strings.Contains(err.Error(), "object stream obj#7") {
-		t.Fatalf("expected object stream context, got %q", err.Error())
+	var offset int64
+	s, withinObj, err := processObject(t.Context(), ctx, "1 0 obj", &offset, 1, nil)
+	if err != nil || s == nil || !withinObj {
+		t.Fatalf("scanner=%v, withinObj=%t, err=%v; want a scanner inside the object", s, withinObj, err)
 	}
 }
 
@@ -730,6 +955,59 @@ func TestDecodeObjectStreamClassifiesCorruptObjectStream(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "object stream obj#7") {
 		t.Fatalf("expected object stream context, got %q", err.Error())
+	}
+}
+
+// TestHeaderVersionAcrossBlockBoundaries verifies false prefixes cannot hide a later PDF header.
+func TestHeaderVersionAcrossBlockBoundaries(t *testing.T) {
+	for _, version := range []model.Version{model.V17, model.V20} {
+		for _, falsePrefix := range []string{"", "%", "%P", "%PD", "%%PDFX"} {
+			for pad := 0; pad < 205; pad++ {
+				in := strings.Repeat("a", pad) + falsePrefix + "%PDF-" + version.String() + "\r\n" + strings.Repeat("b", 200)
+				v, eol, off, err := headerVersion(strings.NewReader(in))
+				if err != nil {
+					t.Fatalf("version %s, padding %d, prefix %q: %v", version, pad, falsePrefix, err)
+				}
+				if v == nil || *v != version || eol != 2 || off != int64(pad+len(falsePrefix)) {
+					t.Fatalf("version %s, padding %d, prefix %q: got version %v, EOL %d, offset %d", version, pad, falsePrefix, v, eol, off)
+				}
+			}
+		}
+	}
+}
+
+// TestReadHeaderAfterFalsePrefix verifies header scanning preserves offsets for a complete PDF.
+func TestReadHeaderAfterFalsePrefix(t *testing.T) {
+	bb, err := os.ReadFile(filepath.Join("..", "testdata", "test.pdf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pad := range []int{85, 98, 99, 185} {
+		in := append([]byte(strings.Repeat("a", pad)+"%"), bb...)
+		conf := model.NewDefaultConfiguration()
+		conf.ValidationMode = model.ValidationStrict
+		if _, err := Read(t.Context(), bytes.NewReader(in), conf); err != nil {
+			t.Fatalf("padding %d: %v", pad, err)
+		}
+	}
+}
+
+// TestHeaderVersionShortLookahead verifies the minimum header buffer at different block positions.
+func TestHeaderVersionShortLookahead(t *testing.T) {
+	for _, pad := range []int{0, 85, 95, 99, 100} {
+		for _, size := range []int{9, 17, 18, 19} {
+			in := strings.Repeat("a", pad) + "%PDF-1.7\n" + strings.Repeat("b", size-9)
+			v, eol, off, err := headerVersion(strings.NewReader(in))
+			if size < 18 {
+				if !errors.Is(err, ErrCorruptHeader) {
+					t.Fatalf("padding %d, size %d: got %v, want ErrCorruptHeader", pad, size, err)
+				}
+				continue
+			}
+			if err != nil || v == nil || *v != model.V17 || eol != 1 || off != int64(pad) {
+				t.Fatalf("padding %d, size %d: version %v, EOL %d, offset %d, error %v", pad, size, v, eol, off, err)
+			}
+		}
 	}
 }
 

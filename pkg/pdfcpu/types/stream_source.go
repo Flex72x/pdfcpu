@@ -249,18 +249,19 @@ func (sd *StreamDict) WriteDecodedTo(c context.Context, destination io.Writer, m
 	}
 	defer func() { err = errors.Join(err, raw.Close()) }()
 	var source io.Reader = contextutil.Reader(c, raw)
-	if len(sd.FilterPipeline) == 0 {
+	filters := sd.nonCryptFilters()
+	if len(filters) == 0 {
 		if sd.RawLength() > maxDecodeBytes {
 			return 0, filter.ErrDecodeLimitExceeded
 		}
 		return copyEncodedStream(source, destination, sd.RawLength())
 	}
-	for index, current := range sd.FilterPipeline {
+	for index, current := range filters {
 		if err := contextutil.Check(c); err != nil {
 			return 0, err
 		}
 		if preserveEncodedImageFilter(current.Name) || current.Name == filter.DCT && sd.CSComponents != 4 {
-			if preserveEncodedImageFilter(current.Name) && index != len(sd.FilterPipeline)-1 {
+			if preserveEncodedImageFilter(current.Name) && index != len(filters)-1 {
 				return 0, fmt.Errorf("stream filter[%d] %q: decode: %w", index, current.Name, filter.ErrUnsupportedFilter)
 			}
 			if maxDecodeBytes < math.MaxInt64 {
@@ -276,7 +277,7 @@ func (sd *StreamDict) WriteDecodedTo(c context.Context, destination io.Writer, m
 		if err := fixParms(current, parms, sd); err != nil {
 			return 0, fmt.Errorf("stream filter[%d] %q: prepare parameters: %w", index, current.Name, err)
 		}
-		if index == len(sd.FilterPipeline)-1 {
+		if index == len(filters)-1 {
 			return filter.DecodeTo(current.Name, parms, maxDecodeBytes, contextutil.Reader(c, source), destination)
 		}
 		var intermediate bytes.Buffer
