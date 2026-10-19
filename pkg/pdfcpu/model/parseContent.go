@@ -152,19 +152,14 @@ func lookupEI(l *string) (int, error) {
 		}
 		j := i + 2
 		ws := 0
-		for j < len(s) && unicode.IsSpace(rune(s[j])) && ws < 2 {
+		for j < len(s) && whitespaceOrEOL(rune(s[j])) {
 			j++
 			ws++
 		}
 		switch {
-		case j == len(s) && ws <= 2:
-			// "EI" at end or followed by 1–2 spaces till end
+		case j == len(s):
 			return i, nil
-		case ws >= 1 && ws <= 2 && j < len(s) && s[j] == 'Q':
-			// "EI" followed by 1–2 spaces, then 'Q'
-			return i, nil
-		case ws == 0 && j == len(s):
-			// suffix "EI"
+		case ws >= 1 && s[j] == 'Q':
 			return i, nil
 		}
 	}

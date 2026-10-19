@@ -17,7 +17,9 @@ limitations under the License.
 package model
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -62,6 +64,8 @@ func TestParseCorruptContent(t *testing.T) {
 		{"BI", "BI"},
 		{"BIData", "BI ID"},
 		{"BIColorSpace", "BI /CS "},
+		{"BIMissingEI", "BI /W 1 /H 1 /BPC 8 /CS /RGB ID \x01\x02\x03"},
+		{"BIFalseEI", "BI /W 1 /H 1 /BPC 8 /CS /RGB ID \x01 EI \r\n x\x02\x03"},
 		{"NameAtEnd", "/Name"},
 	}
 
@@ -71,6 +75,27 @@ func TestParseCorruptContent(t *testing.T) {
 				t.Fatal("expected corrupt content error")
 			}
 		})
+	}
+}
+
+func TestParseContentInlineImageWhitespace(t *testing.T) {
+	for _, whitespace := range []string{" ", "\r\n", "\r \n", " \t\r\n\f\x00 ", strings.Repeat(" ", 4096)} {
+		for _, suffix := range []string{"", "Q /Im0 Do"} {
+			t.Run(fmt.Sprintf("%q/%s", whitespace[:min(len(whitespace), 8)], suffix), func(t *testing.T) {
+				content := "q BI /W 1 /H 1 /BPC 8 /CS /RGB ID \x01EI x\x02\x03 EI" + whitespace + suffix
+				got, err := parseContent(content)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := NewPageResourceNames()
+				if suffix != "" {
+					want["XObject"]["Im0"] = true
+				}
+				if !reflect.DeepEqual(want, got) {
+					t.Fatalf("resources = %v, want %v", got, want)
+				}
+			})
+		}
 	}
 }
 
