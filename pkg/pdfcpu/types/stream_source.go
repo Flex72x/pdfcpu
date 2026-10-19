@@ -11,12 +11,46 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/pdfcpu/pdfcpu/internal/contextutil"
 	"io"
+	"math"
 	"os"
 
+	"github.com/pdfcpu/pdfcpu/internal/contextutil"
 	"github.com/pdfcpu/pdfcpu/pkg/filter"
 )
+
+var ErrEncodedStreamSource = errors.New("encoded stream source failure")
+
+type encodedSourceReader struct {
+	io.ReadCloser
+	remaining int64
+	failure   error
+}
+
+func (reader *encodedSourceReader) Read(data []byte) (int, error) {
+	if reader.failure != nil {
+		return 0, reader.failure
+	}
+	count, err := reader.ReadCloser.Read(data)
+	reader.remaining -= int64(count)
+	if reader.remaining < 0 || err == io.EOF && reader.remaining > 0 {
+		err = errors.Join(fmt.Errorf("%w: length mismatch", ErrEncodedStreamSource), err)
+	} else if err != nil && err != io.EOF {
+		err = fmt.Errorf("%w: read: %w", ErrEncodedStreamSource, err)
+	}
+	if errors.Is(err, ErrEncodedStreamSource) {
+		reader.failure = err
+	}
+	return count, err
+}
+
+func (reader encodedSourceReader) Close() error {
+	var err error
+	if closeErr := reader.ReadCloser.Close(); closeErr != nil {
+		err = fmt.Errorf("%w: close: %w", ErrEncodedStreamSource, closeErr)
+	}
+	return errors.Join(reader.failure, err)
+}
 
 // EncodedStreamSource provides immutable encoded stream bytes with a known
 // length. Open returns a fresh reader owned by the consumer. The source owner
@@ -126,7 +160,17 @@ func (sd StreamDict) OpenRaw() (io.ReadCloser, error) {
 		if sd.Raw != nil {
 			return nil, fmt.Errorf("stream has both Raw and RawSource")
 		}
-		return sd.RawSource.Open()
+		reader, err := sd.RawSource.Open()
+		if err != nil {
+			if reader != nil {
+				err = errors.Join(err, reader.Close())
+			}
+			return nil, fmt.Errorf("%w: open: %w", ErrEncodedStreamSource, err)
+		}
+		if reader == nil {
+			return nil, fmt.Errorf("%w: open returned no reader", ErrEncodedStreamSource)
+		}
+		return &encodedSourceReader{ReadCloser: reader, remaining: sd.RawSource.Size()}, nil
 	}
 	return io.NopCloser(bytes.NewReader(sd.Raw)), nil
 }
@@ -148,7 +192,7 @@ func (sd StreamDict) RawBytes(limit int64) (_ []byte, err error) {
 	defer func() { err = errors.Join(err, reader.Close()) }()
 	data, err := io.ReadAll(io.LimitReader(reader, length+1))
 	if err == nil && int64(len(data)) != length {
-		err = fmt.Errorf("encoded stream source length mismatch")
+		err = fmt.Errorf("%w: length mismatch", ErrEncodedStreamSource)
 	}
 	return data, err
 }
@@ -172,6 +216,10 @@ func (sd StreamDict) WriteRawTo(writer io.Writer) (_ int64, err error) {
 		return 0, err
 	}
 	defer func() { err = errors.Join(err, reader.Close()) }()
+	return copyEncodedStream(reader, writer, length)
+}
+
+func copyEncodedStream(reader io.Reader, writer io.Writer, length int64) (int64, error) {
 	n, err := io.CopyN(writer, reader, length)
 	if err != nil {
 		return n, err
@@ -179,51 +227,63 @@ func (sd StreamDict) WriteRawTo(writer io.Writer) (_ int64, err error) {
 	var extra [1]byte
 	if count, readErr := reader.Read(extra[:]); count != 0 || readErr != io.EOF {
 		if readErr == nil {
-			readErr = fmt.Errorf("encoded stream source length mismatch")
+			readErr = fmt.Errorf("%w: length mismatch", ErrEncodedStreamSource)
 		}
 		return n, readErr
 	}
 	return n, nil
 }
 
-// WriteDecodedTo retains native stream backing for Flate samples. Other filters
-// use their existing bounded decoder. Content caches are never installed here.
 func (sd *StreamDict) WriteDecodedTo(c context.Context, destination io.Writer, maxDecodeBytes int64) (_ int64, err error) {
 	if err = contextutil.Check(c); err != nil {
 		return 0, err
 	}
+	defer func() { err = errors.Join(err, contextutil.Check(c)) }()
 	destination = contextutil.Writer(c, destination)
 	if maxDecodeBytes <= 0 {
 		return 0, filter.ErrDecodeLimitExceeded
-	}
-	if len(sd.FilterPipeline) == 0 {
-		if sd.RawLength() > maxDecodeBytes {
-			return 0, filter.ErrDecodeLimitExceeded
-		}
-		return sd.WriteRawTo(destination)
-	}
-	if len(sd.FilterPipeline) != 1 {
-		local := *sd
-		local.Content = nil
-		data, err := local.DecodeLengthWithLimit(-1, maxDecodeBytes)
-		if err != nil {
-			return 0, err
-		}
-		n, err := destination.Write(data)
-		if err == nil && n != len(data) {
-			err = io.ErrShortWrite
-		}
-		return int64(n), err
-	}
-	f := sd.FilterPipeline[0]
-	parms := parmsForFilter(f.DecodeParms)
-	if err = fixParms(f, parms, sd); err != nil {
-		return 0, err
 	}
 	raw, err := sd.OpenRaw()
 	if err != nil {
 		return 0, err
 	}
 	defer func() { err = errors.Join(err, raw.Close()) }()
-	return filter.DecodeTo(f.Name, parms, maxDecodeBytes, contextutil.Reader(c, raw), destination)
+	var source io.Reader = contextutil.Reader(c, raw)
+	if len(sd.FilterPipeline) == 0 {
+		if sd.RawLength() > maxDecodeBytes {
+			return 0, filter.ErrDecodeLimitExceeded
+		}
+		return copyEncodedStream(source, destination, sd.RawLength())
+	}
+	for index, current := range sd.FilterPipeline {
+		if err := contextutil.Check(c); err != nil {
+			return 0, err
+		}
+		if preserveEncodedImageFilter(current.Name) || current.Name == filter.DCT && sd.CSComponents != 4 {
+			if preserveEncodedImageFilter(current.Name) && index != len(sd.FilterPipeline)-1 {
+				return 0, fmt.Errorf("stream filter[%d] %q: decode: %w", index, current.Name, filter.ErrUnsupportedFilter)
+			}
+			if maxDecodeBytes < math.MaxInt64 {
+				source = io.LimitReader(source, maxDecodeBytes+1)
+			}
+			count, err := io.CopyBuffer(destination, source, make([]byte, 32<<10))
+			if count > maxDecodeBytes {
+				err = errors.Join(err, filter.ErrDecodeLimitExceeded)
+			}
+			return count, err
+		}
+		parms := parmsForFilter(current.DecodeParms)
+		if err := fixParms(current, parms, sd); err != nil {
+			return 0, fmt.Errorf("stream filter[%d] %q: prepare parameters: %w", index, current.Name, err)
+		}
+		if index == len(sd.FilterPipeline)-1 {
+			return filter.DecodeTo(current.Name, parms, maxDecodeBytes, contextutil.Reader(c, source), destination)
+		}
+		var intermediate bytes.Buffer
+		if _, err := filter.DecodeTo(current.Name, parms, maxDecodeBytes, contextutil.Reader(c, source), contextutil.Writer(c, &intermediate)); err != nil {
+			return 0, fmt.Errorf("stream filter[%d] %q: decode: %w", index, current.Name, err)
+		}
+		source = bytes.NewReader(intermediate.Bytes())
+	}
+	return 0, nil
 }

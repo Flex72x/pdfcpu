@@ -261,7 +261,7 @@ func (sd *StreamDict) Encode() error {
 
 	sd.RawSource = nil
 	// No filter specified, nothing to encode.
-	if sd.FilterPipeline == nil {
+	if len(sd.FilterPipeline) == 0 {
 		if log.TraceEnabled() {
 			log.Trace.Println("encodeStream: returning uncompressed stream.")
 		}

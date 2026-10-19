@@ -34,7 +34,11 @@ func (f flate) decodeTo(source io.Reader, destination io.Writer) (total int64, e
 	defer func() { _ = ReleaseZlibReader(rc, err == nil && tracking.err == nil) }()
 	predictor, found := f.parms["Predictor"]
 	if !found || predictor == PredictorNo {
-		total, err = io.CopyBuffer(destination, io.LimitReader(&tracking, f.maxDecodeBytes+1), make([]byte, 32<<10))
+		var decoded io.Reader = &tracking
+		if f.maxDecodeBytes < maxInt64 {
+			decoded = io.LimitReader(decoded, f.maxDecodeBytes+1)
+		}
+		total, err = io.CopyBuffer(destination, decoded, make([]byte, 32<<10))
 		if total > f.maxDecodeBytes {
 			err = ErrDecodeLimitExceeded
 		}

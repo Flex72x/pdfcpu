@@ -17,7 +17,6 @@ limitations under the License.
 package model
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -157,31 +156,11 @@ func equalStreamDicts(c context.Context, sd1, sd2 *types.StreamDict, xRefTable *
 		return false, nil
 	}
 
-	if sd1.Raw == nil || sd2 == nil {
+	if sd1.Raw == nil && sd1.RawSource == nil || sd2.Raw == nil && sd2.RawSource == nil {
 		return false, errors.New("stream dict not loaded")
 	}
 
-	return equalStreamBytes(c, sd1.Raw, sd2.Raw)
-}
-
-func equalStreamBytes(c context.Context, a, b []byte) (bool, error) {
-	if err := contextutil.Check(c); err != nil {
-		return false, err
-	}
-	if len(a) != len(b) {
-		return false, nil
-	}
-	const chunkSize = 64 * 1024
-	for start := 0; start < len(a); start += chunkSize {
-		if err := contextutil.Check(c); err != nil {
-			return false, err
-		}
-		end := start + min(chunkSize, len(a)-start)
-		if !bytes.Equal(a[start:end], b[start:end]) {
-			return false, nil
-		}
-	}
-	return true, contextutil.Check(c)
+	return sd1.EqualRaw(c, *sd2)
 }
 
 func equalFontNames(v1, v2 types.Object, xRefTable *XRefTable) (bool, error) {

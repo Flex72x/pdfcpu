@@ -17,7 +17,6 @@ limitations under the License.
 package pdfcpu
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -35,7 +34,7 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
-func optimizeContentStreamUsage(ctx *model.Context, sd *types.StreamDict, objNr int) (*types.IndirectRef, error) {
+func optimizeContentStreamUsage(c context.Context, ctx *model.Context, sd *types.StreamDict, objNr int) (*types.IndirectRef, error) {
 	f := ctx.Optimize.ContentStreamCache
 	if len(f) == 0 {
 		f[objNr] = sd
@@ -59,7 +58,11 @@ func optimizeContentStreamUsage(ctx *model.Context, sd *types.StreamDict, objNr 
 
 	for _, objNr := range cachedObjNrs {
 		sd1 := f[objNr]
-		if bytes.Equal(sd.Raw, sd1.Raw) {
+		equal, err := sd.EqualRaw(c, *sd1)
+		if err != nil {
+			return nil, err
+		}
+		if equal {
 			ir := types.NewIndirectRef(objNr, 0)
 			ctx.IncrementRefCount(ir)
 			return ir, nil
@@ -70,7 +73,7 @@ func optimizeContentStreamUsage(ctx *model.Context, sd *types.StreamDict, objNr 
 	return nil, nil
 }
 
-func removeEmptyContentStreams(ctx *model.Context, pageDict types.Dict, obj types.Object, pageObjNumber int) error {
+func removeEmptyContentStreams(ctx *model.Context, pageDict types.Dict, obj types.Object, emptyStreams types.IntSet) error {
 	var contentArr types.Array
 
 	if ir, ok := obj.(types.IndirectRef); ok {
@@ -78,15 +81,12 @@ func removeEmptyContentStreams(ctx *model.Context, pageDict types.Dict, obj type
 		objNr := ir.ObjectNumber.Value()
 		entry, found := ctx.FindTableEntry(objNr, ir.GenerationNumber.Value())
 		if !found {
-			return fmt.Errorf("removeEmptyContentStreams: obj#:%d illegal indRef for Contents", pageObjNumber)
+			return fmt.Errorf("removeEmptyContentStreams: obj#:%d illegal indRef for Contents", objNr)
 		}
 
-		contentStreamDict, ok := entry.Object.(types.StreamDict)
+		_, ok := entry.Object.(types.StreamDict)
 		if ok {
-			if err := contentStreamDict.Decode(); err != nil {
-				return fmt.Errorf("content stream obj#%d: decode: %w", objNr, err)
-			}
-			if len(contentStreamDict.Content) == 0 {
+			if emptyStreams[objNr] {
 				pageDict.Delete("Contents")
 			}
 			return nil
@@ -94,11 +94,11 @@ func removeEmptyContentStreams(ctx *model.Context, pageDict types.Dict, obj type
 
 		contentArr, ok = entry.Object.(types.Array)
 		if !ok {
-			return fmt.Errorf("removeEmptyContentStreams: obj#:%d page content entry neither stream dict nor array", pageObjNumber)
+			return fmt.Errorf("removeEmptyContentStreams: obj#:%d page content entry neither stream dict nor array", objNr)
 		}
 
 	} else if contentArr, ok = obj.(types.Array); !ok {
-		return fmt.Errorf("removeEmptyContentStreams: obj#:%d corrupt page content array", pageObjNumber)
+		return fmt.Errorf("removeEmptyContentStreams: corrupt page content array")
 	}
 
 	var newContentArr types.Array
@@ -107,24 +107,20 @@ func removeEmptyContentStreams(ctx *model.Context, pageDict types.Dict, obj type
 
 		ir, ok := c.(types.IndirectRef)
 		if !ok {
-			return fmt.Errorf("removeEmptyContentStreams: obj#:%d corrupt page content array entry", pageObjNumber)
+			return fmt.Errorf("removeEmptyContentStreams: corrupt page content array entry")
 		}
 
 		objNr := ir.ObjectNumber.Value()
 		entry, found := ctx.FindTableEntry(objNr, ir.GenerationNumber.Value())
 		if !found {
-			return fmt.Errorf("removeEmptyContentStreams: obj#:%d illegal indRef for Contents", pageObjNumber)
+			return fmt.Errorf("removeEmptyContentStreams: obj#:%d illegal indRef for Contents", objNr)
 		}
 
-		contentStreamDict, ok := entry.Object.(types.StreamDict)
+		_, ok = entry.Object.(types.StreamDict)
 		if !ok {
-			return fmt.Errorf("identifyPageContent: obj#:%d page content entry is no stream dict", pageObjNumber)
+			return fmt.Errorf("identifyPageContent: obj#:%d page content entry is no stream dict", objNr)
 		}
-
-		if err := contentStreamDict.Decode(); err != nil {
-			return fmt.Errorf("content stream obj#%d: decode: %w", objNr, err)
-		}
-		if len(contentStreamDict.Content) > 0 {
+		if !emptyStreams[objNr] {
 			newContentArr = append(newContentArr, c)
 		}
 	}
@@ -134,13 +130,13 @@ func removeEmptyContentStreams(ctx *model.Context, pageDict types.Dict, obj type
 	return nil
 }
 
-func optimizePageContent(ctx *model.Context, pageDict types.Dict, pageObjNumber int) error {
+func optimizePageContent(c context.Context, ctx *model.Context, pageDict types.Dict, emptyStreams types.IntSet) error {
 	o, found := pageDict.Find("Contents")
 	if !found {
 		return nil
 	}
 
-	if err := removeEmptyContentStreams(ctx, pageDict, o, pageObjNumber); err != nil {
+	if err := removeEmptyContentStreams(ctx, pageDict, o, emptyStreams); err != nil {
 		return fmt.Errorf("remove empty content streams: %w", err)
 	}
 
@@ -160,12 +156,12 @@ func optimizePageContent(ctx *model.Context, pageDict types.Dict, pageObjNumber 
 		objNr := ir.ObjectNumber.Value()
 		entry, found := ctx.FindTableEntry(objNr, ir.GenerationNumber.Value())
 		if !found {
-			return fmt.Errorf("identifyPageContent: obj#:%d illegal indRef for Contents", pageObjNumber)
+			return fmt.Errorf("identifyPageContent: obj#:%d illegal indRef for Contents", objNr)
 		}
 
 		contentStreamDict, ok := entry.Object.(types.StreamDict)
 		if ok {
-			ir, err := optimizeContentStreamUsage(ctx, &contentStreamDict, objNr)
+			ir, err := optimizeContentStreamUsage(c, ctx, &contentStreamDict, objNr)
 			if err != nil {
 				return fmt.Errorf("content stream obj#%d: optimize usage: %w", objNr, err)
 			}
@@ -182,11 +178,11 @@ func optimizePageContent(ctx *model.Context, pageDict types.Dict, pageObjNumber 
 
 		contentArr, ok = entry.Object.(types.Array)
 		if !ok {
-			return fmt.Errorf("identifyPageContent: obj#:%d page content entry neither stream dict nor array", pageObjNumber)
+			return fmt.Errorf("identifyPageContent: obj#:%d page content entry neither stream dict nor array", objNr)
 		}
 
 	} else if contentArr, ok = o.(types.Array); !ok {
-		return fmt.Errorf("identifyPageContent: obj#:%d corrupt page content array", pageObjNumber)
+		return fmt.Errorf("identifyPageContent: corrupt page content array")
 	}
 
 	// TODO Activate content array optimization as soon as we have a proper test file.
@@ -1176,12 +1172,6 @@ func parsePageTreeKid(c context.Context, ctx *model.Context, v types.Object, kid
 		return pageNr, nil
 	}
 
-	if ctx.OptimizeDuplicateContentStreams {
-		if err = optimizePageContent(ctx, d, int(ir.ObjectNumber)); err != nil {
-			return 0, fmt.Errorf("page %d obj#%d: optimize content: %w", pageNr+1, ir.ObjectNumber.Value(), err)
-		}
-	}
-
 	if err := ctx.DeleteDictEntry(c, d, "PieceInfo"); err != nil {
 		return 0, fmt.Errorf("page %d obj#%d: delete PieceInfo: %w", pageNr+1, ir.ObjectNumber.Value(), err)
 	}
@@ -1867,14 +1857,6 @@ func CacheFormFonts(ctx *model.Context) error {
 	return nil
 }
 
-func optimizeResourceDicts(ctx *model.Context) error {
-	if err := ctx.ConsolidatePageResources(); err != nil {
-		return err
-	}
-	// TODO Remove resource dicts from inner nodes.
-	return nil
-}
-
 func resolveWidth(ctx *model.Context, sd *types.StreamDict) error {
 	if obj, ok := sd.Find("Width"); ok {
 		w, err := ctx.DereferenceNumber(obj)
@@ -1942,12 +1924,11 @@ func OptimizeXRefTable(c context.Context, ctx *model.Context) error {
 	if err := runOptimizationPhase(c, func() error { return fixReferencesToFreeObjects(c, ctx) }); err != nil {
 		return fmt.Errorf("fix references to free objects: %w", err)
 	}
-
-	if shouldOptimizeResourceDicts(ctx) {
-		// Extra step with potential for performance hit when processing large files.
-		if err := runOptimizationPhase(c, func() error { return optimizeResourceDicts(ctx) }); err != nil {
-			return fmt.Errorf("optimize resources: %w", err)
-		}
+	if err := runOptimizationPhase(c, func() error {
+		_, err := externalizeInlineImages(c, ctx, true)
+		return err
+	}); err != nil {
+		return fmt.Errorf("externalize inline images: %w", err)
 	}
 
 	// Get rid of duplicate embedded fonts and images.

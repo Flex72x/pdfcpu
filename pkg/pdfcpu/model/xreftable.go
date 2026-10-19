@@ -2037,68 +2037,23 @@ func rect(xRefTable *XRefTable, a types.Array) (*types.Rectangle, error) {
 	return types.NewRectangle(llx, lly, urx, ury), nil
 }
 
-func weaveResourceSubDict(d1, d2 types.Dict) {
-	for k, v := range d1 {
-		if v != nil {
-			v = v.Clone()
-		}
-		d2[k] = v
-	}
-}
-
 func (xRefTable *XRefTable) consolidateResources(obj types.Object, pAttrs *InheritedPageAttrs) error {
 	d, err := xRefTable.DereferenceDict(obj)
 	if err != nil {
 		return err
 	}
-	if len(d) == 0 {
+	if d == nil {
 		return nil
 	}
-
-	if pAttrs.Resources == nil {
-		// Create a resource dict that eventually will contain any inherited resources
-		// walking down from page root to leaf node representing the page in question.
-		pAttrs.Resources = d.Clone().(types.Dict)
-		for _, k := range slices.Sorted(maps.Keys(pAttrs.Resources)) {
-			o, err := xRefTable.Dereference(pAttrs.Resources[k])
-			if err != nil {
-				return fmt.Errorf("resource %s: %w", k, err)
-			}
-			if o != nil {
-				pAttrs.Resources[k] = o.Clone()
-			}
-		}
-		if log.WriteEnabled() {
-			log.Write.Printf("pA:\n%s\n", pAttrs.Resources)
-		}
-		return nil
-	}
-
-	// Accumulate any resources defined in this page node into the inherited resources.
-	for _, k := range slices.Sorted(maps.Keys(d)) {
-		v := d[k]
-		if k == "ProcSet" || v == nil {
-			continue
-		}
-		d1, err := xRefTable.DereferenceDict(v)
+	pAttrs.Resources = d.Clone().(types.Dict)
+	for _, key := range slices.Sorted(maps.Keys(pAttrs.Resources)) {
+		object, err := xRefTable.Dereference(pAttrs.Resources[key])
 		if err != nil {
-			return fmt.Errorf("resource %s: %w", k, err)
+			return fmt.Errorf("resource %s: %w", key, err)
 		}
-		if d1 == nil {
-			continue
+		if object != nil {
+			pAttrs.Resources[key] = object.Clone()
 		}
-		// We have identified a subdict that needs to go into the inherited res dict.
-		if pAttrs.Resources[k] == nil {
-			pAttrs.Resources[k] = d1.Clone()
-			continue
-		}
-		d2, ok := pAttrs.Resources[k].(types.Dict)
-		if !ok {
-			return fmt.Errorf("consolidateResources: expected Dict d2: %T", pAttrs.Resources[k])
-		}
-		// Weave sub dict d1 into inherited sub dict d2.
-		// Any existing resource names will be overridden.
-		weaveResourceSubDict(d1, d2)
 	}
 
 	return nil
@@ -2164,38 +2119,73 @@ func (xRefTable *XRefTable) checkInheritedPageAttrs(pageDict types.Dict, pAttrs 
 		if err != nil {
 			return err
 		}
-		pAttrs.Resources = d
+		if d != nil {
+			pAttrs.Resources = d
+		}
 		return nil
 	}
 
-	// Accumulate inherited resources.
 	return xRefTable.consolidateResources(obj, pAttrs)
 }
 
-func (xRefTable *XRefTable) decodeContentStream(sd *types.StreamDict, pageNr int) error {
-	err := sd.Decode()
-	if errors.Is(err, filter.ErrUnsupportedFilter) {
-		return fmt.Errorf("page %d content decode: %w", pageNr, err)
+func (xRefTable *XRefTable) decodeContentStream(c context.Context, sd *types.StreamDict, pageNr int) error {
+	if c != nil {
+		if err := contextutil.Check(c); err != nil {
+			return err
+		}
+	}
+	limit := int64(filter.DefaultMaxDecodeBytes)
+	if xRefTable.Conf != nil && xRefTable.Conf.Limits.MaxDecodeBytes > 0 {
+		limit = xRefTable.Conf.Limits.MaxDecodeBytes
+	}
+	if int64(len(sd.Content)) > limit {
+		return fmt.Errorf("page %d content decode: %w", pageNr, filter.ErrDecodeLimitExceeded)
+	}
+	var err error
+	if c == nil {
+		err = sd.DecodeWithLimit(limit)
+	} else if sd.Content == nil {
+		var decoded bytes.Buffer
+		_, err = sd.WriteDecodedTo(c, &decoded, limit)
+		if err == nil {
+			sd.Content = decoded.Bytes()
+		}
 	}
 	if err != nil {
-		if xRefTable.ValidationMode == ValidationStrict {
-			return fmt.Errorf("page %d content decode: %w", pageNr, err)
-		}
-		if !filter.IsCorruptFlateInput(err) && !errors.Is(err, zlib.ErrChecksum) {
-			return fmt.Errorf("page %d content decode: %w", pageNr, err)
-		}
-		ShowSkipped(fmt.Sprintf("page %d: corrupt content stream (flate)", pageNr))
+		return fmt.Errorf("page %d content decode: %w", pageNr, err)
 	}
 	return nil
 }
 
 // PageContent returns the content in PDF syntax for page dict d.
 func (xRefTable *XRefTable) PageContent(d types.Dict, pageNr int) ([]byte, error) {
+	return xRefTable.pageContent(nil, d, pageNr, nil)
+}
+
+func (xRefTable *XRefTable) pageContent(c context.Context, d types.Dict, pageNr int, data *PageContentData) ([]byte, error) {
+	decode := func(stream *types.StreamDict, reference types.IndirectRef, referenced bool) error {
+		err := xRefTable.decodeContentStream(c, stream, pageNr)
+		if err != nil {
+			if xRefTable.ValidationMode == ValidationStrict || errors.Is(err, types.ErrEncodedStreamSource) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || (!filter.IsCorruptFlateInput(err) && !errors.Is(err, zlib.ErrChecksum)) {
+				return err
+			}
+			if data != nil {
+				data.DecodeError = errors.Join(data.DecodeError, err)
+			}
+			ShowSkipped(fmt.Sprintf("page %d: corrupt content stream (flate)", pageNr))
+			return nil
+		}
+		if data != nil && referenced && len(stream.Content) == 0 {
+			data.EmptyStreams[reference.ObjectNumber.Value()] = true
+		}
+		return nil
+	}
 	o, _ := d.Find("Contents")
 	if o == nil {
 		return nil, ErrNoContent
 	}
 
+	reference, referenced := o.(types.IndirectRef)
 	o, err := xRefTable.Dereference(o)
 	if err != nil || o == nil {
 		return nil, err
@@ -2207,7 +2197,7 @@ func (xRefTable *XRefTable) PageContent(d types.Dict, pageNr int) ([]byte, error
 
 	case types.StreamDict:
 		// no further processing.
-		if err := xRefTable.decodeContentStream(&o, pageNr); err != nil {
+		if err := decode(&o, reference, referenced); err != nil {
 			return nil, err
 		}
 		bb = append(bb, o.Content...)
@@ -2218,6 +2208,7 @@ func (xRefTable *XRefTable) PageContent(d types.Dict, pageNr int) ([]byte, error
 			if o == nil {
 				continue
 			}
+			reference, referenced := o.(types.IndirectRef)
 			o, _, err := xRefTable.DereferenceStreamDict(o)
 			if err != nil {
 				return nil, fmt.Errorf("page %d content decode: %w", pageNr, err)
@@ -2225,7 +2216,7 @@ func (xRefTable *XRefTable) PageContent(d types.Dict, pageNr int) ([]byte, error
 			if o == nil {
 				continue
 			}
-			if err := xRefTable.decodeContentStream(o, pageNr); err != nil {
+			if err := decode(o, reference, referenced); err != nil {
 				return nil, err
 			}
 			bb = append(bb, o.Content...)
@@ -2263,16 +2254,23 @@ func (xRefTable *XRefTable) consolidateResourceSubDict(d types.Dict, key string,
 		}
 		return nil
 	}
-	if !prn.HasResources(key) {
+	if !prn.HasResources(key) && key != "ColorSpace" {
 		d.Delete(key)
 		return nil
 	}
-	d1 := o.(types.Dict)
+	d1, ok := o.(types.Dict)
+	if !ok {
+		return fmt.Errorf("page %d: %s resource entry must be a dictionary", pageNr, key)
+	}
 	set := types.StringSet{}
 	res := prn.Resources(key)
 	// Iterate over inherited resource sub dict and remove any entries not required.
 	for k := range d1 {
 		ki := types.Name(k).Value()
+		if key == "ColorSpace" && types.MemberOf(ki, []string{"DefaultGray", "DefaultRGB", "DefaultCMYK"}) {
+			set[ki] = true
+			continue
+		}
 		if !res[ki] {
 			d1.Delete(k)
 			continue
@@ -2288,6 +2286,10 @@ func (xRefTable *XRefTable) consolidateResourceSubDict(d types.Dict, key string,
 			}
 			ShowSkipped(s)
 		}
+	}
+	if !prn.HasResources(key) && len(d1) == 0 {
+		d.Delete(key)
+		return nil
 	}
 	d[key] = d1
 	return nil
@@ -2356,6 +2358,11 @@ func (xRefTable *XRefTable) consolidateResourcesWithContent(pageDict, resDict ty
 		return fmt.Errorf("%s: %w", contentContext, err)
 	}
 
+	return xRefTable.consolidateDecodedResources(pageDict, resDict, pageNr, bb)
+}
+
+func (xRefTable *XRefTable) consolidateDecodedResources(pageDict, resDict types.Dict, pageNr int, bb []byte) error {
+	contentContext := xRefTable.pageContentContext(pageDict)
 	// Calculate resources required by the content stream of this page.
 	prn, err := parseContent(string(bb))
 	if err != nil {
@@ -2582,11 +2589,14 @@ func cloneInheritedPageAttrs(pAttrs InheritedPageAttrs) InheritedPageAttrs {
 }
 
 func (xRefTable *XRefTable) consolidatePageResourcesForKid(
+	c context.Context,
 	o types.Object,
 	pAttrs InheritedPageAttrs,
 	pageNr *int,
 	depth int,
 	visit *PageTreeVisit,
+	transform PageContentTransform,
+	consolidate bool,
 ) error {
 	indRef, ok := o.(types.IndirectRef)
 	if !ok {
@@ -2600,7 +2610,7 @@ func (xRefTable *XRefTable) consolidatePageResourcesForKid(
 	if objType != "Pages" && objType != "Page" {
 		return errForUnexpectedPageObjectType(xRefTable.ValidationMode, objType, indRef)
 	}
-	return xRefTable.consolidatePageResourcesForNode(&indRef, pAttrs, pageNr, depth+1, visit)
+	return xRefTable.consolidatePageResourcesForNode(c, &indRef, pAttrs, pageNr, depth+1, visit, transform, consolidate)
 }
 
 type pageResourceContextError struct {
@@ -2618,12 +2628,20 @@ func (e *pageResourceContextError) Unwrap() error {
 }
 
 func (xRefTable *XRefTable) consolidatePageResourcesForNode(
+	c context.Context,
 	root *types.IndirectRef,
 	pAttrs InheritedPageAttrs,
 	pageNr *int,
 	depth int,
 	visit *PageTreeVisit,
+	transform PageContentTransform,
+	consolidate bool,
 ) error {
+	if c != nil {
+		if err := contextutil.Check(c); err != nil {
+			return err
+		}
+	}
 	if err := xRefTable.CheckRecursionDepth("page tree", depth); err != nil {
 		return err
 	}
@@ -2643,15 +2661,12 @@ func (xRefTable *XRefTable) consolidatePageResourcesForNode(
 	kids := d.ArrayEntry("Kids")
 	if kids == nil {
 		currentPageNr := *pageNr + 1
-		if err := xRefTable.consolidateResourcesWithContent(d, pAttrs.Resources, currentPageNr, true); err != nil {
+		if err := xRefTable.processPageContent(c, d, pAttrs.Resources, currentPageNr, transform, consolidate); err != nil {
 			return &pageResourceContextError{
 				pageNr: currentPageNr,
 				objNr:  root.ObjectNumber.Value(),
 				err:    err,
 			}
-		}
-		if len(pAttrs.Resources) > 0 {
-			d["Resources"] = pAttrs.Resources
 		}
 		*pageNr = currentPageNr
 		return nil
@@ -2667,7 +2682,7 @@ func (xRefTable *XRefTable) consolidatePageResourcesForNode(
 		if o == nil {
 			continue
 		}
-		if err := xRefTable.consolidatePageResourcesForKid(o, pAttrs, pageNr, depth, visit); err != nil {
+		if err := xRefTable.consolidatePageResourcesForKid(c, o, pAttrs, pageNr, depth, visit, transform, consolidate); err != nil {
 			return err
 		}
 	}
@@ -2676,6 +2691,55 @@ func (xRefTable *XRefTable) consolidatePageResourcesForNode(
 
 // ConsolidatePageResources consolidates inherited resource dictionaries in one page-tree pass.
 func (xRefTable *XRefTable) ConsolidatePageResources() error {
+	return xRefTable.transformPageContents(nil, nil, true)
+}
+
+type PageContentData struct {
+	PageNumber   int
+	Dict         types.Dict
+	Resources    types.Dict
+	Content      []byte
+	EmptyStreams types.IntSet
+	DecodeError  error
+}
+
+type PageContentTransform func(*PageContentData) error
+
+func (xRefTable *XRefTable) TransformPageContents(c context.Context, transform PageContentTransform, consolidate bool) error {
+	if err := contextutil.Check(c); err != nil {
+		return err
+	}
+	if err := xRefTable.transformPageContents(c, transform, consolidate); err != nil {
+		return err
+	}
+	return contextutil.Check(c)
+}
+
+func (xRefTable *XRefTable) processPageContent(c context.Context, page, resources types.Dict, pageNr int, transform PageContentTransform, consolidate bool) error {
+	data := PageContentData{PageNumber: pageNr, Dict: page, Resources: resources, EmptyStreams: types.IntSet{}}
+	content, err := xRefTable.pageContent(c, page, pageNr, &data)
+	if err != nil && !errors.Is(err, ErrNoContent) {
+		return fmt.Errorf("%s: %w", xRefTable.pageContentContext(page), err)
+	}
+	if transform != nil {
+		data.Content = content
+		if err := transform(&data); err != nil {
+			return err
+		}
+		content, resources = data.Content, data.Resources
+	}
+	if consolidate && data.DecodeError == nil && len(content) > 0 {
+		if err := xRefTable.consolidateDecodedResources(page, resources, pageNr, content); err != nil {
+			return err
+		}
+	}
+	if resources != nil && (consolidate || transform != nil) {
+		page["Resources"] = resources
+	}
+	return nil
+}
+
+func (xRefTable *XRefTable) transformPageContents(c context.Context, transform PageContentTransform, consolidate bool) error {
 	root, err := xRefTable.Pages()
 	if err != nil {
 		return fmt.Errorf("page 1: resource dict: %w", err)
@@ -2686,11 +2750,14 @@ func (xRefTable *XRefTable) ConsolidatePageResources() error {
 
 	pageNr := 0
 	err = xRefTable.consolidatePageResourcesForNode(
+		c,
 		root,
 		InheritedPageAttrs{},
 		&pageNr,
 		0,
 		NewPageTreeVisit(),
+		transform,
+		consolidate,
 	)
 	if err != nil {
 		var pageErr *pageResourceContextError

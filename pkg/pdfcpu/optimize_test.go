@@ -112,7 +112,7 @@ func TestOptimizeResourceDictsErrorIncludesPageContext(t *testing.T) {
 	ctx.PageCount = 1
 	ctx.RootDict["Pages"] = *types.NewIndirectRef(999, 0)
 
-	err := optimizeResourceDicts(ctx)
+	err := ctx.ConsolidatePageResources()
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -150,17 +150,18 @@ func TestOptimizeResourceDictsConsolidatesInheritedResources(t *testing.T) {
 		}
 	}
 	ctx.PageCount = len(pageDicts)
+	delete(pageDicts[1], "Resources")
 	pageDicts[0]["Resources"] = types.Dict{
 		"XObject": types.Dict{"X0": types.Name("pageOne")},
 	}
 
-	if err := optimizeResourceDicts(ctx); err != nil {
+	if err := ctx.ConsolidatePageResources(); err != nil {
 		t.Fatal(err)
 	}
 
 	pageOneResources := pageDicts[0].DictEntry("Resources")
-	if pageOneResources == nil || pageOneResources.DictEntry("Font") == nil || pageOneResources.DictEntry("XObject") == nil {
-		t.Fatalf("page one resources not consolidated: %v", pageOneResources)
+	if pageOneResources == nil || pageOneResources.DictEntry("Font") != nil || pageOneResources.DictEntry("XObject") == nil {
+		t.Fatalf("page one local resources not respected: %v", pageOneResources)
 	}
 	pageTwoResources := pageDicts[1].DictEntry("Resources")
 	if pageTwoResources == nil || pageTwoResources.DictEntry("Font") == nil {
@@ -338,12 +339,9 @@ func TestOptimizeXRefTableContentErrorIncludesDeepPageContext(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	for _, want := range []string{
-		"optimize fonts and images",
-		"page tree",
+		"externalize inline images",
 		"page 1 obj#",
-		"optimize content",
-		"remove empty content streams",
-		"corrupt page content array",
+		"page content must be stream dict or array",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("expected %q in %q", want, err.Error())

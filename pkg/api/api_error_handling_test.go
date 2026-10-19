@@ -2988,7 +2988,7 @@ func TestPublicOptimizeContextErrorsIncludeLowerPhaseContext(t *testing.T) {
 	if !strings.Contains(err.Error(), "optimize context") {
 		t.Fatalf("expected optimize context, got %q", err.Error())
 	}
-	if !strings.Contains(err.Error(), "optimize fonts and images") {
+	if !strings.Contains(err.Error(), "externalize inline images") {
 		t.Fatalf("expected optimize phase context, got %q", err.Error())
 	}
 }
