@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
@@ -203,6 +204,54 @@ func TestMergeZipPreservesPageAttributes(t *testing.T) {
 				checkZipMergeAttrs(t, ctx, pageNr, types.RectForDim(300, 400), tc.crop, 90, tc.font)
 			}
 		})
+	}
+}
+
+func untypedPageRootPDF() []byte {
+	objects := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> >>",
+	}
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.7\n")
+	offsets := make([]int, len(objects))
+	for i, body := range objects {
+		offsets[i] = appendValidationTestObject(&b, i+1, body)
+	}
+	xref := b.Len()
+	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for _, offset := range offsets {
+		fmt.Fprintf(&b, "%010d 00000 n \n", offset)
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Root 1 0 R /Size %d >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
+	return b.Bytes()
+}
+
+// TestMergeTypesUntypedPageTreeRoot covers PaperPort scans whose page tree root
+// has no Type: merged, that root is an inner node the optimizer must walk.
+func TestMergeTypesUntypedPageTreeRoot(t *testing.T) {
+	untyped := untypedPageRootPDF()
+	strict := model.NewStatelessConfiguration()
+	strict.ValidationMode = model.ValidationStrict
+	_, err := ReadAndValidate(t.Context(), bytes.NewReader(untyped), strict)
+	if err == nil || !strings.Contains(err.Error(), "page tree root: missing Type") {
+		t.Fatalf("strict validation: got %v, want missing Type", err)
+	}
+
+	conf := model.NewStatelessConfiguration()
+	conf.ValidationMode = model.ValidationRelaxed
+	var out bytes.Buffer
+	sources := []io.ReadSeeker{bytes.NewReader(untyped), bytes.NewReader(untyped), bytes.NewReader(untyped)}
+	if err := MergeRaw(t.Context(), sources, &out, false, conf); err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := ReadAndValidate(t.Context(), bytes.NewReader(out.Bytes()), strict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.PageCount != 3 {
+		t.Fatalf("page count = %d, want 3", ctx.PageCount)
 	}
 }
 

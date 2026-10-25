@@ -1647,6 +1647,27 @@ func validateOrRepairPageTreeCount(xRefTable *model.XRefTable, pageRoot types.Di
 	return nil
 }
 
+// validatePageRootType requires the page tree root to carry its Type. Relaxed
+// validation types an untyped root, as PaperPort writes it: a merge makes the
+// root an inner node, and every page tree walk requires the Type there.
+func validatePageRootType(xRefTable *model.XRefTable, pageRoot types.Dict, objNr int) error {
+	dictType, _, err := xRefTable.DereferenceNameEntry(pageRoot, "Type")
+	if err != nil {
+		err = fmt.Errorf("page tree root: Type: %w", err)
+		return model.WithValidationErrorObject(err, objNr)
+	}
+	if dictType != nil {
+		return nil
+	}
+	if xRefTable.ValidationMode == model.ValidationStrict {
+		err := errors.New("page tree root: missing Type")
+		return model.WithValidationErrorObject(err, objNr)
+	}
+	pageRoot["Type"] = types.Name("Pages")
+	model.ShowRepaired(fmt.Sprintf("page tree root obj#%d missing Type", objNr))
+	return nil
+}
+
 func validatePages(c context.Context, xRefTable *model.XRefTable, rootDict types.Dict) (types.Dict, error) {
 	if err := contextutil.Check(c); err != nil {
 		return nil, err
@@ -1690,6 +1711,10 @@ func validatePages(c context.Context, xRefTable *model.XRefTable, rootDict types
 			err = errors.New("page tree root: cannot dereference page node")
 			return nil, model.WithValidationErrorObject(err, objNr)
 		}
+	}
+
+	if err = validatePageRootType(xRefTable, pageRoot, objNr); err != nil {
+		return nil, err
 	}
 
 	obj, found = pageRoot.Find("Count")
