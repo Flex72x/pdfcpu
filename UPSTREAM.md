@@ -54,7 +54,8 @@ Baseline: upstream `d4effbd9` (28 September 2026). Reviewed through `b41a41d5` (
 | `98098e11` fix Indexed image Decode mapping and palette clamping | берём | Индекс палитры зажимается по HiVal, как и наше исправление в backend. |
 | `7843f3bf`, `18c27900`, `36c55970`, `1a61f880`, `e3f3cf00`, `679959ac`, `b4ff51eb` (внешние ссылки, embedded files, Reference XObject, OPI, Web Capture, пароли в URL) | не берём | Валидация и отчёты о ссылках, см. правила. |
 | `7b3a487b`, `99222dd1`, `4aaf161b`, `422f8fc1`, `00187b64`, `05b59d32`, `71d5830a`, `91b7ff81`, `7ab33925`, `ba94f4a3`, `21d22d7f`, `b1be5edc` (валидация media, Sound, Movie, Rendition, RichMedia, 3D, активное содержимое) | не берём | Строже валидация, см. правила. |
-| `10aa9df4`, `d0282ae5` (перенос тестов инвентаря, референсы TIFF) | не берём | Тестовое обслуживание upstream. |
+| `10aa9df4` (перенос тестов инвентаря) | не берём | Тестовое обслуживание upstream. |
+| `d0282ae5` refresh TIFF references for zeroed directory padding | берём | Форк на `hhrutter/tiff` v1.0.7, который обнуляет заполнитель значений в каталоге TIFF; без новых эталонов `TestExtractImagesSoftMasks` расходится побайтно при тех же пикселях. |
 | `2f7a89a0` bump version | не берём | Версию форка ведём сами. |
 
 ## Upstream 2f7a89a0..b41a41d5 (11 October 2026)

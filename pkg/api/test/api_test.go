@@ -18,6 +18,7 @@ package test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -61,7 +62,6 @@ func userFonts(dir string) ([]string, error) {
 func TestMain(m *testing.M) {
 	inDir = filepath.Join("..", "..", "testdata")
 	resDir = filepath.Join(inDir, "resources")
-	samplesDir = filepath.Join("..", "..", "samples")
 
 	var err error
 	conf, err = api.LoadConfiguration(api.ConfigurationOptions{Mode: api.ConfigurationModeAuto})
@@ -92,11 +92,22 @@ func TestMain(m *testing.M) {
 		fmt.Printf("%v", err)
 		os.Exit(1)
 	}
+
+	// The suite reads samples it generated earlier in the run and overwrites
+	// them, so it works on a copy and the committed pkg/samples stays intact.
+	if samplesDir, err = os.MkdirTemp("", "pdfcpu_api_samples"); err != nil {
+		fmt.Printf("%v", err)
+		os.Exit(1)
+	}
+	if err = os.CopyFS(samplesDir, os.DirFS(filepath.Join("..", "..", "samples"))); err != nil {
+		fmt.Printf("%v", err)
+		os.Exit(1)
+	}
 	// fmt.Printf("outDir = %s\n", outDir)
 
 	exitCode := m.Run()
 
-	if err = os.RemoveAll(outDir); err != nil {
+	if err = errors.Join(os.RemoveAll(outDir), os.RemoveAll(samplesDir)); err != nil {
 		fmt.Printf("%v", err)
 		os.Exit(1)
 	}

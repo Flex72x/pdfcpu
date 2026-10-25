@@ -163,8 +163,6 @@ parents during vacation--so there was no bright side to life anywhere.`
 
 func createAndValidate(t *testing.T, xRefTable *model.XRefTable, outFile, msg string) {
 	t.Helper()
-	outDir := "../../samples/basic"
-	outFile = filepath.Join(outDir, outFile)
 	if err := api.CreatePDFFile(t.Context(), xRefTable, outFile, nil); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
@@ -190,7 +188,7 @@ func TestCreateDemoPDF(t *testing.T) {
 	if err = addPageTreeWithPage(t.Context(), xRefTable, rootDict, p); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
-	createAndValidate(t, xRefTable, "Test.pdf", msg)
+	createAndValidate(t, xRefTable, filepath.Join(samplesDir, "basic", "Test.pdf"), msg)
 }
 
 func firstPageTreeKid(t *testing.T, xRefTable *model.XRefTable, d types.Dict) types.Dict {
@@ -254,7 +252,7 @@ func TestResourceDictInheritanceDemoPDF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
-	createAndValidate(t, xRefTable, "ResourceDictInheritanceDemo.pdf", msg)
+	createAndValidate(t, xRefTable, filepath.Join(samplesDir, "basic", "ResourceDictInheritanceDemo.pdf"), msg)
 }
 
 // TestAnnotationDemoPDF verifies annotation demo PDF.
@@ -264,7 +262,7 @@ func TestAnnotationDemoPDF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
-	createAndValidate(t, xRefTable, "AnnotationDemo.pdf", msg)
+	createAndValidate(t, xRefTable, filepath.Join(samplesDir, "basic", "AnnotationDemo.pdf"), msg)
 }
 
 // TestFormDemoPDF verifies the form demo PDF.
@@ -274,7 +272,7 @@ func TestFormDemoPDF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
-	createAndValidate(t, xRefTable, "FormDemo.pdf", msg)
+	createAndValidate(t, xRefTable, filepath.Join(samplesDir, "basic", "FormDemo.pdf"), msg)
 }
 
 func writeTextDemoAlignedWidthAndMargin(c context.Context, xRefTable *model.XRefTable, p model.Page, region *types.Rectangle, hAlign types.HAlignment, w, mLeft, mRight, mTop, mBot float64) {
@@ -1740,7 +1738,7 @@ func createXRefAndWritePDF(t *testing.T, msg, fileName string, mediaBox *types.R
 		t.Fatalf("%s: %v\n", msg, err)
 	}
 
-	outDir := filepath.Join("..", "..", "samples", "basic")
+	outDir := filepath.Join(samplesDir, "basic")
 	outFile := filepath.Join(outDir, fileName+".pdf")
 	createAndValidate(t, xRefTable, outFile, msg)
 }
@@ -2039,7 +2037,7 @@ func createXRefAndWriteJustifiedPDF(t *testing.T, msg, fileName string, mediaBox
 		t.Fatalf("%s: %v\n", msg, err)
 	}
 
-	outDir := filepath.Join("..", "..", "samples", "basic")
+	outDir := filepath.Join(samplesDir, "basic")
 	outFile := filepath.Join(outDir, fileName+".pdf")
 	createAndValidate(t, xRefTable, outFile, msg)
 }
@@ -2069,7 +2067,7 @@ func createXRefAndWriteRTLPDF(t *testing.T, msg, fileName string, mediaBox *type
 	if err = addPageTreeWithPage(t.Context(), xRefTable, rootDict, p); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
-	outDir := filepath.Join("..", "..", "samples", "basic")
+	outDir := filepath.Join(samplesDir, "basic")
 	outFile := filepath.Join(outDir, fileName+".pdf")
 	createAndValidate(t, xRefTable, outFile, msg)
 }
@@ -2196,7 +2194,7 @@ func TestCJKV(t *testing.T) {
 	if err = addPageTreeWithPage(t.Context(), xRefTable, rootDict, p); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
-	outDir := filepath.Join("..", "..", "samples", "basic")
+	outDir := filepath.Join(samplesDir, "basic")
 	outFile := filepath.Join(outDir, "UserFont_CJKV.pdf")
 	createAndValidate(t, xRefTable, outFile, msg)
 }

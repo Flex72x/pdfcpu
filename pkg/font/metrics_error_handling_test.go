@@ -17,8 +17,8 @@ limitations under the License.
 package font
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"encoding/gob"
 	"errors"
 	"io"

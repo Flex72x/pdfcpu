@@ -70,7 +70,7 @@ func TestListBookmarks(t *testing.T) {
 func TestAddDuplicateBookmarks(t *testing.T) {
 	msg := "TestAddDuplicateBookmarks"
 	inFile := filepath.Join(inDir, "CenterOfWhy.pdf")
-	outFile := filepath.Join("..", "..", "samples", "bookmarks", "bookmarkDuplicates.pdf")
+	outFile := filepath.Join(samplesDir, "bookmarks", "bookmarkDuplicates.pdf")
 
 	bms := []pdfcpu.Bookmark{
 		{PageFrom: 1, Title: "Parent1",
@@ -100,7 +100,7 @@ func TestAddDuplicateBookmarks(t *testing.T) {
 func TestAddSimpleBookmarks(t *testing.T) {
 	msg := "TestAddSimpleBookmarks"
 	inFile := filepath.Join(inDir, "CenterOfWhy.pdf")
-	outFile := filepath.Join("..", "..", "samples", "bookmarks", "bookmarkSimple.pdf")
+	outFile := filepath.Join(samplesDir, "bookmarks", "bookmarkSimple.pdf")
 
 	bookmarkColor := color.NewSimpleColor(0xab6f30)
 

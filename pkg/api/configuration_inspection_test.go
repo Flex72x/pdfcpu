@@ -75,6 +75,21 @@ func initializeInspectionRoot(t *testing.T, root string) string {
 	return conf.Path
 }
 
+// skipIfModeBitsDoNotDenyWrites skips when the process writes into a
+// read-only directory anyway, as root does: such a path is writable, and the
+// inspection is right to report it so.
+func skipIfModeBitsDoNotDenyWrites(t *testing.T, dir string) {
+	t.Helper()
+	probe, err := os.CreateTemp(dir, "write-probe-*")
+	if err != nil {
+		return
+	}
+	if err := errors.Join(probe.Close(), os.Remove(probe.Name())); err != nil {
+		t.Fatal(err)
+	}
+	t.Skip("mode bits do not deny writes to this user")
+}
+
 func setInspectionTreeMode(t *testing.T, root string, dirMode, fileMode fs.FileMode) {
 	t.Helper()
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -359,6 +374,7 @@ func TestInspectConfigurationReportsReadOnlyPaths(t *testing.T) {
 	t.Cleanup(func() {
 		setInspectionTreeMode(t, root, 0755, 0644)
 	})
+	skipIfModeBitsDoNotDenyWrites(t, root)
 	before := inspectionTreeSnapshot(t, root)
 
 	inspection, err := InspectConfiguration(ConfigurationOptions{Root: root, Mode: ConfigurationModeReadOnly})

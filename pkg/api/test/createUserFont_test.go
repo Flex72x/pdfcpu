@@ -576,7 +576,7 @@ func TestUserFonts(t *testing.T) {
 	if err = addPageTreeWithPage(t.Context(), xRefTable, rootDict, p); err != nil {
 		t.Fatalf("%s: %v\n", msg, err)
 	}
-	outDir := filepath.Join("..", "..", "samples", "basic")
+	outDir := filepath.Join(samplesDir, "basic")
 	outFile := filepath.Join(outDir, "UserFont_HumanRights.pdf")
 	createAndValidate(t, xRefTable, outFile, msg)
 }

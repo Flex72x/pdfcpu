@@ -55,7 +55,7 @@ func testBooklet(t *testing.T, msg string, inFiles []string, outFile string, sel
 
 // TestBooklet verifies booklet creation.
 func TestBooklet(t *testing.T) {
-	outDir := filepath.Join("..", "..", "samples", "booklet")
+	outDir := filepath.Join(samplesDir, "booklet")
 
 	for _, tt := range []struct {
 		msg           string

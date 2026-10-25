@@ -28,7 +28,7 @@ import (
 func TestStampUserFont(t *testing.T) {
 	msg := "TestStampUserFont"
 	inFile := filepath.Join(inDir, "mountain.pdf")
-	outDir := filepath.Join("..", "..", "samples", "stamp", "text", "utf8")
+	outDir := filepath.Join(samplesDir, "stamp", "text", "utf8")
 
 	for _, sample := range langSamples {
 		outFile := filepath.Join(outDir, sample.lang+".pdf")
