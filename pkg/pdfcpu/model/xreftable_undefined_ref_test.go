@@ -51,3 +51,40 @@ func TestInsertNewSkipsUndefinedReferences(t *testing.T) {
 		}
 	}
 }
+
+// TestRecycledObjectSkipsReferencedFreeNumbers verifies that a free entry still referenced by an object
+// (a dangling reference, e.g. to a cross-reference stream number) is not recycled for a new object.
+func TestRecycledObjectSkipsReferencedFreeNumbers(t *testing.T) {
+	size := 5
+	offset := func(v int64) *int64 { return &v }
+	gen := func(v int) *int { return &v }
+	xRefTable := &XRefTable{Table: map[int]*XRefTableEntry{
+		0: {Free: true, Offset: offset(2), Generation: gen(types.FreeHeadGeneration)},
+		1: {},
+		2: {Free: true, Offset: offset(3), Generation: gen(0)},
+		3: {Free: true, Offset: offset(0), Generation: gen(0)},
+		4: {},
+	}, Size: &size}
+
+	xRefTable.IncrementRefCount(types.NewIndirectRef(2, 0))
+	if got := xRefTable.Table[2].RefCount; got != 0 {
+		t.Fatalf("RefCount of free object = %d, want 0", got)
+	}
+
+	ref, err := xRefTable.IndRefForNewObject(types.Array{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ref.ObjectNumber.Value(); got != 3 {
+		t.Fatalf("first new object = %d, want 3", got)
+	}
+	if !xRefTable.Table[2].Free || *xRefTable.Table[2].Offset != 0 {
+		t.Fatalf("referenced free entry changed: %+v", xRefTable.Table[2])
+	}
+	if ref, err = xRefTable.IndRefForNewObject(types.Array{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ref.ObjectNumber.Value(); got != 5 {
+		t.Fatalf("second new object = %d, want 5", got)
+	}
+}

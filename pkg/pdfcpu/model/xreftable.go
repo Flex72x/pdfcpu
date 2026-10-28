@@ -403,13 +403,13 @@ func (xRefTable *XRefTable) FindTableEntryForIndRef(indRef *types.IndirectRef) (
 }
 
 // IncrementRefCount increments the number of references for the object pointed to by indRef.
-// A reference to an undefined object is a reference to null (7.3.10), but its number stays taken:
+// A reference to an undefined or free object is a reference to null (7.3.10), but its number stays taken:
 // a new object receiving it would make the reference resolve to that object.
 func (xRefTable *XRefTable) IncrementRefCount(indRef *types.IndirectRef) {
 	if indRef == nil {
 		return
 	}
-	if entry, ok := xRefTable.FindTableEntryForIndRef(indRef); ok {
+	if entry, ok := xRefTable.FindTableEntryForIndRef(indRef); ok && !entry.Free {
 		entry.RefCount++
 		return
 	}
@@ -455,8 +455,23 @@ func (xRefTable *XRefTable) InsertAndUseRecycled(xRefTableEntry XRefTableEntry) 
 		return 0, err
 	}
 
+	// Recycle the first free object whose number no reference still points to, and unlink it from the free list.
+	previous := freeListHeadEntry
+	for steps := 0; ; steps++ {
+		objNr = int(*previous.Offset)
+		if objNr == 0 || !xRefTable.undefinedRefs[objNr] {
+			break
+		}
+		if steps == len(xRefTable.Table) {
+			return 0, fmt.Errorf("insertAndRecycle: free list cycles at obj #%d", objNr)
+		}
+		if previous, _ = xRefTable.Free(objNr); previous == nil {
+			return 0, fmt.Errorf("insertAndRecycle: no free entry for obj #%d", objNr)
+		}
+	}
+
 	// If none available, add new object & return.
-	if *freeListHeadEntry.Offset == 0 {
+	if objNr == 0 {
 		xRefTableEntry.RefCount = 1
 		objNr = xRefTable.InsertNew(xRefTableEntry)
 		if log.WriteEnabled() {
@@ -465,17 +480,15 @@ func (xRefTable *XRefTable) InsertAndUseRecycled(xRefTableEntry XRefTableEntry) 
 		return objNr, nil
 	}
 
-	// Recycle free object, update free list & return.
-	objNr = int(*freeListHeadEntry.Offset)
 	entry, found := xRefTable.FindTableEntryLight(objNr)
 	if !found {
 		return 0, fmt.Errorf("insertAndRecycle: no entry for obj #%d", objNr)
 	}
 
-	// The new free list head entry becomes the old head entry's successor.
-	freeListHeadEntry.Offset = entry.Offset
+	// The predecessor now links to the recycled entry's successor.
+	previous.Offset = entry.Offset
 
-	// The old head entry becomes garbage.
+	// The old entry becomes garbage.
 	entry.Free = false
 	entry.Offset = nil
 
