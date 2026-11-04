@@ -941,7 +941,14 @@ func TestReadAndValidateValidationErrorsMatchValidateAPIContext(t *testing.T) {
 }
 
 func TestValidateUsesTypedValidationObjectAttribution(t *testing.T) {
-	err := Validate(t.Context(), bytes.NewReader(attributedValidationTestPDF()), nil, nil)
+	// The form field is not a reason to refuse the document in relaxed mode.
+	if err := Validate(t.Context(), bytes.NewReader(attributedValidationTestPDF()), nil, nil); err != nil {
+		t.Fatalf("relaxed validation: %v", err)
+	}
+
+	conf := model.NewDefaultConfiguration()
+	conf.ValidationMode = model.ValidationStrict
+	err := Validate(t.Context(), bytes.NewReader(attributedValidationTestPDF()), conf, nil)
 	if err == nil {
 		t.Fatal("expected validation error")
 	}

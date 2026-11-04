@@ -1527,6 +1527,29 @@ func rootEntryValidators(c context.Context) []rootEntryValidator {
 	}
 }
 
+// nonDrawingRootEntries are the catalog entries that nothing reads to draw or
+// rewrite pages. Name and number trees stay out: their traversal guards reject
+// cycles and duplicates regardless of the validation mode.
+var nonDrawingRootEntries = map[string]bool{
+	"PageMode":       true,
+	"Outlines":       true,
+	"AcroForm":       true,
+	"StructTreeRoot": true,
+	"AF":             true,
+}
+
+// skipOptionalValidationFailure reports whether relaxed validation may continue
+// after a failure in document data that does not draw pages: catalog entries,
+// annotations and form fields. Such data stays in the document as it was, and
+// viewers show the document regardless, so it is no reason to refuse the file.
+func skipOptionalValidationFailure(c context.Context, xRefTable *model.XRefTable, err error) bool {
+	if xRefTable.ValidationMode != model.ValidationRelaxed || contextutil.Check(c) != nil {
+		return false
+	}
+	model.ShowSkipped(err.Error())
+	return true
+}
+
 func validateRootEntries(
 	c context.Context,
 	xRefTable *model.XRefTable,
@@ -1542,6 +1565,9 @@ func validateRootEntries(
 		}
 		if err := validator.validate(xRefTable, rootDict, validator.required, validator.sinceVersion); err != nil {
 			err = fmt.Errorf("%s: %w", validator.name, err)
+			if nonDrawingRootEntries[validator.name] && skipOptionalValidationFailure(c, xRefTable, err) {
+				continue
+			}
 			return model.WithValidationErrorObject(
 				err, validationEntryObjectNumber(rootObjNr, rootDict, validator.name),
 			)
@@ -1626,17 +1652,25 @@ func validateRootObject(c context.Context, ctx *model.Context, rootDict types.Di
 	}
 
 	// Validate remainder of annotations after AcroForm validation only.
+	annotationsValid := true
 	if _, err = validatePagesAnnotations(c, xRefTable, rootPageNodeDict, 0); err != nil {
-		return fmt.Errorf("page annotations: %w", err)
+		err = fmt.Errorf("page annotations: %w", err)
+		if !skipOptionalValidationFailure(c, xRefTable, err) {
+			return err
+		}
+		annotationsValid = false
 	}
 
 	// Validate form fields against page annotations.
 	if err = contextutil.Check(c); err != nil {
 		return err
 	}
-	if xRefTable.Form != nil {
+	if xRefTable.Form != nil && annotationsValid {
 		if err := validateFormFieldsAgainstPageAnnotations(xRefTable); err != nil {
-			return fmt.Errorf("form fields/page annotations: %w", err)
+			err = fmt.Errorf("form fields/page annotations: %w", err)
+			if !skipOptionalValidationFailure(c, xRefTable, err) {
+				return err
+			}
 		}
 	}
 
