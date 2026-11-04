@@ -2311,12 +2311,80 @@ func (xRefTable *XRefTable) consolidateResourceSubDict(d types.Dict, key string,
 }
 
 func (xRefTable *XRefTable) consolidateResourceDict(d types.Dict, prn PageResourceNames, pageNr int) error {
+	if xRefTable.resourcesUsedImplicitly(d) {
+		return nil
+	}
 	for _, k := range resourceTypes {
 		if err := xRefTable.consolidateResourceSubDict(d, k, prn, pageNr); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// resourcesUsedImplicitly reports whether something in the page resources draws
+// with those same resources: a form, Type 3 font or pattern without Resources of
+// its own inherits the page's (ISO 32000-1, 7.8.3). The names it uses are in its
+// own stream, so the page content alone cannot tell which resources are unused.
+func (xRefTable *XRefTable) resourcesUsedImplicitly(resources types.Dict) bool {
+	lacksResources := func(o types.Object) bool {
+		o, err := xRefTable.Dereference(o)
+		if err != nil {
+			return true
+		}
+		switch v := o.(type) {
+		case types.StreamDict:
+			_, found := v.Dict["Resources"]
+			return !found
+		case types.Dict:
+			if subtype := v.NameEntry("Subtype"); subtype == nil || *subtype != "Type3" {
+				return false
+			}
+			_, found := v["Resources"]
+			return !found
+		}
+		return false
+	}
+	category := func(name string) types.Dict {
+		d, err := xRefTable.DereferenceDict(resources[name])
+		if err != nil {
+			return nil
+		}
+		return d
+	}
+	for _, name := range []string{"Font", "Pattern"} {
+		for _, o := range category(name) {
+			if lacksResources(o) {
+				return true
+			}
+		}
+	}
+	for _, o := range category("XObject") {
+		sd, _, err := xRefTable.DereferenceStreamDict(o)
+		if err != nil {
+			return true
+		}
+		if sd == nil {
+			continue
+		}
+		if subtype := sd.Dict.NameEntry("Subtype"); subtype != nil && *subtype == "Form" && lacksResources(*sd) {
+			return true
+		}
+	}
+	for _, o := range category("ExtGState") {
+		state, err := xRefTable.DereferenceDict(o)
+		if err != nil {
+			return true
+		}
+		mask, err := xRefTable.DereferenceDict(state["SMask"])
+		if err != nil {
+			return true
+		}
+		if group, found := mask["G"]; found && lacksResources(group) {
+			return true
+		}
+	}
+	return false
 }
 
 func (xRefTable *XRefTable) pageContentContext(pageDict types.Dict) string {

@@ -2195,6 +2195,26 @@ func buildXRefTableStartingAt(c context.Context, ctx *model.Context, offset *int
 // Can be "xref" or indirect object reference eg. "34 0 obj"
 // Keep digesting xref sections as long as there is a defined previous xref section
 // and build up the xref table along the way.
+// maxPDFObjectNumber is the highest indirect object number PDF allows (ISO 32000
+// annex C). Readers treat a reference to anything above it as null.
+const maxPDFObjectNumber = 8388607
+
+// dropObjectsAboveLimit keeps a tiny file from demanding work and memory for
+// billions of object numbers: everything sized by the highest number, from the
+// xref written back to Size, would otherwise follow one forged number.
+func dropObjectsAboveLimit(xRefTable *model.XRefTable) {
+	for objNr := range xRefTable.Table {
+		if objNr > maxPDFObjectNumber {
+			delete(xRefTable.Table, objNr)
+		}
+	}
+	xRefTable.MaxObjNr = min(xRefTable.MaxObjNr, maxPDFObjectNumber)
+	if xRefTable.Size != nil && *xRefTable.Size > maxPDFObjectNumber+1 {
+		size := maxPDFObjectNumber + 1
+		xRefTable.Size = &size
+	}
+}
+
 func readXRefTable(c context.Context, ctx *model.Context) (err error) {
 	if log.ReadEnabled() {
 		log.Read.Println("readXRefTable: begin")
@@ -2218,6 +2238,8 @@ func readXRefTable(c context.Context, ctx *model.Context) (err error) {
 	if err != nil {
 		return
 	}
+
+	dropObjectsAboveLimit(ctx.XRefTable)
 
 	//Log list of free objects (not the "free list").
 	//log.Read.Printf("freelist: %v\n", ctx.freeObjects())

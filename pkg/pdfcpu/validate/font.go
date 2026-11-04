@@ -925,10 +925,12 @@ func validateType0FontDict(c context.Context, xRefTable *model.XRefTable, d type
 
 	// DescendantFonts: one-element array specifying the CIDFont dictionary that is the descendant of this Type 0 font, required.
 	if err = validateDescendantFonts(xRefTable, d, dictName, REQUIRED); err != nil {
-		if xRefTable.ValidationMode == model.ValidationRelaxed {
-			err = ErrMissingFont
+		if xRefTable.ValidationMode != model.ValidationRelaxed {
+			return fontName, err
 		}
-		return fontName, err
+		// A renderer may well draw a font this validator objects to. Keep it:
+		// dropping the reference would remove the page's text from the output.
+		model.ShowSkipped(fmt.Sprintf("font %s: descendant font: %v", fontName, err))
 	}
 
 	// ToUnicode, optional, CMap stream dict
