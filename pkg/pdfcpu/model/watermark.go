@@ -105,15 +105,14 @@ type Watermark struct {
 	PdfMultiStartPageNrDest int                  // start page number of the destination PDF file.
 
 	// page specific
-	Bb      *types.Rectangle   // bounding box of the form representing this watermark.
-	BbTrans types.QuadLiteral  // Transformed bounding box.
-	Vp      *types.Rectangle   // view port, page dimensions.
-	PageRot int                // page rotation in effect.
-	Form    *types.IndirectRef // form dependent on given page dimensions.
+	Bb            *types.Rectangle   // bounding box of the form representing this watermark.
+	BbTrans       types.QuadLiteral  // Transformed bounding box.
+	Vp            *types.Rectangle   // view port: the visible page region as displayed, lower left corner at the origin.
+	PageTransform matrix.Matrix      // maps view port coordinates to page user space.
+	Form          *types.IndirectRef // form dependent on given page dimensions.
 
 	// house keeping
-	Objs   types.IntSet // objects for which wm has been applied already.
-	FCache formCache    // form cache.
+	FCache formCache // form cache.
 }
 
 // DefaultWatermarkConfig returns the default configuration.
@@ -135,15 +134,14 @@ func DefaultWatermarkConfig() *Watermark {
 		Opacity:                 1.0,
 		RenderMode:              draw.RMFill,
 		PdfRes:                  map[int]PdfResources{},
-		Objs:                    types.IntSet{},
 		FCache:                  formCache{},
+		PageTransform:           matrix.IdentMatrix,
 		TextLines:               []string{},
 	}
 }
 
 // Recycle resets all caches.
 func (wm *Watermark) Recycle() {
-	wm.Objs = types.IntSet{}
 	wm.FCache = formCache{}
 }
 
@@ -210,8 +208,7 @@ func (wm Watermark) String() string {
 		"opacity: %.1f\n"+
 		"renderMode: %d\n"+
 		"bbox:%s\n"+
-		"vp:%s\n"+
-		"pageRotation: %d\n",
+		"vp:%s\n",
 		t, s, wm.Typ(),
 		wm.FontName, wm.FontSize,
 		wm.PdfPageNrSrc,
@@ -223,7 +220,6 @@ func (wm Watermark) String() string {
 		wm.RenderMode,
 		bbox,
 		vp,
-		wm.PageRot,
 	)
 }
 

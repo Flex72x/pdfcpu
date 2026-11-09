@@ -335,12 +335,11 @@ func TestAddWatermarksInitializesMissingCaches(t *testing.T) {
 		t.Fatal(err)
 	}
 	wm.FCache = nil
-	wm.Objs = nil
 
 	if err := AddWatermarks(t.Context(), ctx, nil, wm); err != nil {
 		t.Fatal(err)
 	}
-	if wm.FCache == nil || wm.Objs == nil {
+	if wm.FCache == nil {
 		t.Fatal("expected initialized watermark caches")
 	}
 }
@@ -510,25 +509,6 @@ func TestInsertPageWatermarkContentsRejectsIncompleteState(t *testing.T) {
 	}
 }
 
-func TestPatchPageWatermarkContentRejectsUnsupportedFilter(t *testing.T) {
-	sd := types.StreamDict{
-		Dict: types.NewDict(),
-		Raw:  []byte("encoded"),
-		FilterPipeline: []types.PDFFilter{
-			{Name: filter.JBIG2},
-			{Name: filter.ASCIIHex},
-		},
-	}
-
-	err := patchFirstContentStreamForWatermark(&sd, "GS0", "Fm0", stampContentTestWatermark(), true)
-	if !errors.Is(err, filter.ErrUnsupportedFilter) {
-		t.Fatalf("expected %v, got %v", filter.ErrUnsupportedFilter, err)
-	}
-	if !strings.Contains(err.Error(), "decode stream") {
-		t.Fatalf("expected decode context in %q", err.Error())
-	}
-}
-
 func TestUpdatePageWatermarkContentsHandlesDirectStream(t *testing.T) {
 	ctx := testOptimizeContext(t)
 	sd, err := ctx.NewStreamDictForBuf([]byte("q Q"))
@@ -543,8 +523,13 @@ func TestUpdatePageWatermarkContentsHandlesDirectStream(t *testing.T) {
 	if err := updatePageContentsForWM(ctx, pageDict, stampContentTestWatermark(), "GS0", "Fm0"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := pageDict["Contents"].(types.StreamDict); !ok {
-		t.Fatalf("expected direct stream dictionary, got %T", pageDict["Contents"])
+	contents, ok := pageDict["Contents"].(types.Array)
+	if !ok || len(contents) != 2 {
+		t.Fatalf("expected watermark and page content streams, got %v", pageDict["Contents"])
+	}
+	page, _, err := ctx.DereferenceStreamDict(contents[1])
+	if err != nil || page == nil || !bytes.Equal(page.Content, sd.Content) {
+		t.Fatalf("expected the direct stream kept as the page content, got %v (%v)", page, err)
 	}
 }
 

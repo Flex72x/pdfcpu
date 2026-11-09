@@ -1514,7 +1514,7 @@ func cacheFormForPage(wm *model.Watermark, pageNr int, ir *types.IndirectRef) {
 }
 
 func ensureWatermarkCaches(wm *model.Watermark) {
-	if wm.FCache == nil || wm.Objs == nil {
+	if wm.FCache == nil {
 		wm.Recycle()
 	}
 }
@@ -1657,7 +1657,7 @@ func wmContent(wm *model.Watermark, gsID, xoID string) ([]byte, error) {
 	if gsID == "" || xoID == "" {
 		return nil, errors.New("missing page resource identifier")
 	}
-	m := wm.CalcTransformMatrix()
+	m := wm.CalcTransformMatrix().Multiply(wm.PageTransform)
 	p1 := m.Transform(types.Point{X: wm.Bb.LL.X, Y: wm.Bb.LL.Y})
 	p2 := m.Transform(types.Point{X: wm.Bb.UR.X, Y: wm.Bb.LL.Y})
 	p3 := m.Transform(types.Point{X: wm.Bb.UR.X, Y: wm.Bb.UR.Y})
@@ -1680,20 +1680,9 @@ func insertPageContentsForWM(ctx *model.Context, pageDict types.Dict, wm *model.
 	if err != nil {
 		return fmt.Errorf("generate content: %w", err)
 	}
-	sd, err := ctx.NewStreamDictForBuf(bb)
+	ir, err := newWatermarkContentStream(ctx, bb)
 	if err != nil {
-		return fmt.Errorf("create stream dictionary: %w", err)
-	}
-	if sd == nil {
-		return errors.New("create stream dictionary: missing stream dictionary")
-	}
-	if err := sd.Encode(); err != nil {
-		return fmt.Errorf("encode stream: %w", err)
-	}
-
-	ir, err := ctx.IndRefForNewObject(*sd)
-	if err != nil {
-		return fmt.Errorf("create stream object: %w", err)
+		return err
 	}
 
 	pageDict.Insert("Contents", *ir)
@@ -1701,79 +1690,7 @@ func insertPageContentsForWM(ctx *model.Context, pageDict types.Dict, wm *model.
 	return nil
 }
 
-func patchFirstContentStreamForWatermark(sd *types.StreamDict, gsID, xoID string, wm *model.Watermark, isLast bool) error {
-	if sd == nil {
-		return errors.New("missing content stream")
-	}
-	err := sd.Decode()
-	if err == filter.ErrUnsupportedFilter {
-		return fmt.Errorf("decode stream: %w", err)
-	}
-	if err != nil {
-		return fmt.Errorf("decode stream: %w", err)
-	}
-
-	wmbb, err := wmContent(wm, gsID, xoID)
-	if err != nil {
-		return fmt.Errorf("generate content: %w", err)
-	}
-
-	// stamp
-	if wm.OnTop {
-		bb := []byte(" q ")
-		if wm.PageRot != 0 {
-			bb = append(bb, model.ContentBytesForPageRotation(wm.PageRot, wm.Vp.Width(), wm.Vp.Height())...)
-		}
-		sd.Content = append(bb, sd.Content...)
-		if !isLast {
-			if err := sd.Encode(); err != nil {
-				return fmt.Errorf("encode leading stream: %w", err)
-			}
-			return nil
-		}
-		sd.Content = append(sd.Content, []byte(" Q ")...)
-		sd.Content = append(sd.Content, wmbb...)
-		if err := sd.Encode(); err != nil {
-			return fmt.Errorf("encode stamped stream: %w", err)
-		}
-		return nil
-	}
-
-	// watermark
-	if wm.PageRot == 0 {
-		sd.Content = append(wmbb, sd.Content...)
-		if err := sd.Encode(); err != nil {
-			return fmt.Errorf("encode watermarked stream: %w", err)
-		}
-		return nil
-	}
-
-	bb := append([]byte(" q "), model.ContentBytesForPageRotation(wm.PageRot, wm.Vp.Width(), wm.Vp.Height())...)
-	sd.Content = append(bb, sd.Content...)
-	if isLast {
-		sd.Content = append(sd.Content, []byte(" Q")...)
-	}
-	if err := sd.Encode(); err != nil {
-		return fmt.Errorf("encode rotated stream: %w", err)
-	}
-	return nil
-}
-
-func newContentStreamForWatermark(ctx *model.Context, gsID, xoID string, wm *model.Watermark) (*types.IndirectRef, error) {
-	if wm == nil {
-		return nil, ErrMissingWatermarkConfiguration
-	}
-	var bb []byte
-	if wm.OnTop {
-		wmBB, err := wmContent(wm, gsID, xoID)
-		if err != nil {
-			return nil, fmt.Errorf("generate content: %w", err)
-		}
-		bb = append([]byte(" Q "), wmBB...)
-	} else if wm.PageRot != 0 {
-		bb = []byte(" Q ")
-	}
-
+func newWatermarkContentStream(ctx *model.Context, bb []byte) (*types.IndirectRef, error) {
 	sd, err := ctx.NewStreamDictForBuf(bb)
 	if err != nil {
 		return nil, fmt.Errorf("create stream dictionary: %w", err)
@@ -1781,17 +1698,14 @@ func newContentStreamForWatermark(ctx *model.Context, gsID, xoID string, wm *mod
 	if sd == nil {
 		return nil, errors.New("create stream dictionary: missing stream dictionary")
 	}
-
 	if err := sd.Encode(); err != nil {
 		return nil, fmt.Errorf("encode stream: %w", err)
 	}
-
-	indRef, err := ctx.IndRefForNewObject(*sd)
+	ir, err := ctx.IndRefForNewObject(*sd)
 	if err != nil {
 		return nil, fmt.Errorf("create stream object: %w", err)
 	}
-
-	return indRef, nil
+	return ir, nil
 }
 
 func contentObjectForIndRef(ctx *model.Context, ir types.IndirectRef) (*model.XRefTableEntry, types.Object, int, error) {
@@ -1806,57 +1720,46 @@ func contentObjectForIndRef(ctx *model.Context, ir types.IndirectRef) (*model.XR
 	return entry, entry.Object, objNr, nil
 }
 
-func patchPageWatermarkStream(d types.Dict, entry *model.XRefTableEntry, objNr int, sd types.StreamDict, gsID, xoID string, wm *model.Watermark, isLast bool) error {
-	if objNr > 0 && wm.Objs[objNr] {
-		return nil
+// pageContentStreams returns the page content as a list of stream references, in drawing order.
+// A direct content stream becomes an object of its own so that it can be listed.
+func pageContentStreams(ctx *model.Context, obj types.Object) (types.Array, error) {
+	if ir, ok := obj.(types.IndirectRef); ok {
+		_, o, _, err := contentObjectForIndRef(ctx, ir)
+		if err != nil {
+			return nil, err
+		}
+		switch o.(type) {
+		case types.StreamDict:
+			return types.Array{ir}, nil
+		case types.Array:
+			obj = o
+		default:
+			return nil, fmt.Errorf("expected stream dictionary or array, got %T", o)
+		}
 	}
-	if err := patchFirstContentStreamForWatermark(&sd, gsID, xoID, wm, isLast); err != nil {
-		return err
+
+	switch o := obj.(type) {
+	case types.StreamDict:
+		ir, err := ctx.IndRefForNewObject(o)
+		if err != nil {
+			return nil, fmt.Errorf("store direct content stream: %w", err)
+		}
+		return types.Array{*ir}, nil
+	case types.Array:
+		for i, entry := range o {
+			if _, ok := entry.(types.IndirectRef); !ok {
+				return nil, fmt.Errorf("content array entry %d: expected indirect reference, got %T", i+1, entry)
+			}
+		}
+		return o, nil
+	default:
+		return nil, fmt.Errorf("expected stream dictionary or array, got %T", obj)
 	}
-	if entry == nil {
-		d["Contents"] = sd
-		return nil
-	}
-	entry.Object = sd
-	wm.Objs[objNr] = true
-	return nil
 }
 
-func patchPageWatermarkContentArray(ctx *model.Context, d types.Dict, a types.Array, gsID, xoID string, wm *model.Watermark) error {
-	if len(a) == 0 {
-		return nil
-	}
-	ir, ok := a[0].(types.IndirectRef)
-	if !ok {
-		return fmt.Errorf("content array entry 1: expected indirect reference, got %T", a[0])
-	}
-	entry, obj, objNr, err := contentObjectForIndRef(ctx, ir)
-	if err != nil {
-		return fmt.Errorf("content array entry 1: %w", err)
-	}
-	sd, ok := obj.(types.StreamDict)
-	if !ok {
-		return fmt.Errorf("content array entry 1 obj#%d: expected stream dictionary, got %T", objNr, obj)
-	}
-	if wm.Objs[objNr] {
-		return nil
-	}
-	if err := patchPageWatermarkStream(d, entry, objNr, sd, gsID, xoID, wm, len(a) == 1); err != nil {
-		return fmt.Errorf("content array entry 1 obj#%d: patch stream: %w", objNr, err)
-	}
-	if len(a) == 1 {
-		return nil
-	}
-
-	newIR, err := newContentStreamForWatermark(ctx, gsID, xoID, wm)
-	if err != nil {
-		return fmt.Errorf("append content stream: %w", err)
-	}
-	d["Contents"] = append(a, *newIR)
-	wm.Objs[newIR.ObjectNumber.Value()] = true
-	return nil
-}
-
+// updatePageContentsForWM puts the watermark around the page content without changing that content:
+// content streams may be shared by several pages, so they are only referenced, never edited.
+// A watermark is drawn before the page content; a stamp is drawn after it, in a restored graphics state.
 func updatePageContentsForWM(ctx *model.Context, d types.Dict, wm *model.Watermark, gsID, xoID string) error {
 	if d == nil {
 		return errors.New("missing page dictionary")
@@ -1864,33 +1767,39 @@ func updatePageContentsForWM(ctx *model.Context, d types.Dict, wm *model.Waterma
 	if wm == nil {
 		return ErrMissingWatermarkConfiguration
 	}
-	ensureWatermarkCaches(wm)
 	obj, found := d.Find("Contents")
 	if !found || obj == nil {
 		return errors.New("missing Contents")
 	}
-
-	var entry *model.XRefTableEntry
-	var objNr int
-	if ir, ok := obj.(types.IndirectRef); ok {
-		var err error
-		entry, obj, objNr, err = contentObjectForIndRef(ctx, ir)
-		if err != nil {
-			return fmt.Errorf("Contents: %w", err)
-		}
+	streams, err := pageContentStreams(ctx, obj)
+	if err != nil {
+		return fmt.Errorf("Contents: %w", err)
+	}
+	wmbb, err := wmContent(wm, gsID, xoID)
+	if err != nil {
+		return fmt.Errorf("generate content: %w", err)
 	}
 
-	switch o := obj.(type) {
-	case types.StreamDict:
-		if err := patchPageWatermarkStream(d, entry, objNr, o, gsID, xoID, wm, true); err != nil {
-			return fmt.Errorf("content stream: patch: %w", err)
-		}
-		return nil
-	case types.Array:
-		return patchPageWatermarkContentArray(ctx, d, o, gsID, xoID, wm)
-	default:
-		return fmt.Errorf("Contents: expected stream dictionary or array, got %T", obj)
+	before, after := wmbb, []byte(nil)
+	if wm.OnTop {
+		before, after = []byte("q "), append([]byte(" Q "), wmbb...)
 	}
+
+	contents := make(types.Array, 0, len(streams)+2)
+	ir, err := newWatermarkContentStream(ctx, before)
+	if err != nil {
+		return fmt.Errorf("leading content stream: %w", err)
+	}
+	contents = append(contents, *ir)
+	contents = append(contents, streams...)
+	if after != nil {
+		if ir, err = newWatermarkContentStream(ctx, after); err != nil {
+			return fmt.Errorf("trailing content stream: %w", err)
+		}
+		contents = append(contents, *ir)
+	}
+	d["Contents"] = contents
+	return nil
 }
 
 func viewPort(a *model.InheritedPageAttrs) *types.Rectangle {
@@ -1995,23 +1904,31 @@ func pageWatermarkContext(c context.Context, ctx *model.Context, pageNr int) (ty
 	return d, pageIndRef, attrs, nil
 }
 
-func normalizePageWatermark(d types.Dict, attrs *model.InheritedPageAttrs, wm *model.Watermark) error {
-	wm.PageRot = attrs.Rotate
-	wm.Vp = viewPort(attrs)
-	if wm.Vp == nil {
+// normalizePageWatermark lays the watermark out on the page as displayed: the viewport is the visible region
+// turned by the page rotation, and PageTransform maps it back to user space. The page itself stays unchanged.
+func normalizePageWatermark(attrs *model.InheritedPageAttrs, wm *model.Watermark) error {
+	vr := viewPort(attrs)
+	if vr == nil {
 		return errors.New("missing page viewport")
 	}
-	if wm.PageRot == 0 {
-		return nil
+	// Viewers ignore a rotation that is not a multiple of 90, so the switch leaves such a page unturned.
+	rot := composePageRotation(attrs.Rotate, 0)
+	w, h := vr.Width(), vr.Height()
+	m := matrix.IdentMatrix
+	switch rot {
+	case 90:
+		w, h = h, w
+		m[0][0], m[0][1], m[1][0], m[1][1], m[2][0], m[2][1] = 0, 1, -1, 0, vr.UR.X, vr.LL.Y
+	case 180:
+		m[0][0], m[1][1], m[2][0], m[2][1] = -1, -1, vr.UR.X, vr.UR.Y
+	case 270:
+		w, h = h, w
+		m[0][0], m[0][1], m[1][0], m[1][1], m[2][0], m[2][1] = 0, -1, 1, 0, vr.LL.X, vr.UR.Y
+	default:
+		m[2][0], m[2][1] = vr.LL.X, vr.LL.Y
 	}
-	if types.IntMemberOf(wm.PageRot, []int{+90, -90, +270, -270}) {
-		w := wm.Vp.Width()
-		wm.Vp.UR.X = wm.Vp.LL.X + wm.Vp.Height()
-		wm.Vp.UR.Y = wm.Vp.LL.Y + w
-	}
-	d.Update("MediaBox", wm.Vp.Array())
-	d.Update("CropBox", wm.Vp.Array())
-	d.Delete("Rotate")
+	wm.Vp = types.RectForDim(w, h)
+	wm.PageTransform = m
 	return nil
 }
 
@@ -2036,7 +1953,7 @@ func addPageWatermark(c context.Context, ctx *model.Context, pageNr int, wm mode
 		return err
 	}
 
-	if err := normalizePageWatermark(d, inhPAttrs, &wm); err != nil {
+	if err := normalizePageWatermark(inhPAttrs, &wm); err != nil {
 		return err
 	}
 
