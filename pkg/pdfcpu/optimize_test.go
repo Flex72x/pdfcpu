@@ -511,3 +511,40 @@ func TestCacheFormFontsErrorIncludesFormFontObjectContext(t *testing.T) {
 		t.Fatalf("expected form font context, got %q", err.Error())
 	}
 }
+
+func TestCacheFormFontsSkipsNonDictFontInRelaxedMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode    int
+		wantErr bool
+	}{
+		{mode: model.ValidationRelaxed},
+		{mode: model.ValidationStrict, wantErr: true},
+	} {
+		ctx := testOptimizeContext(t)
+		ctx.XRefTable.ValidationMode = tc.mode
+		objNr, err := ctx.InsertObject(types.StreamDict{Dict: types.Dict{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx.Form = types.Dict{
+			"DR": types.Dict{
+				"Font": types.Dict{"F1": *types.NewIndirectRef(objNr, 0)},
+			},
+		}
+
+		err = CacheFormFonts(ctx)
+		if tc.wantErr {
+			want := fmt.Sprintf("form font obj#%d: dereference font dict", objNr)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("mode %d: expected %q, got %v", tc.mode, want, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("mode %d: unexpected error: %v", tc.mode, err)
+		}
+		if len(ctx.Optimize.FormFontObjects) != 0 {
+			t.Fatalf("mode %d: broken form font must not be cached", tc.mode)
+		}
+	}
+}

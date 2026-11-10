@@ -1836,7 +1836,13 @@ func CacheFormFonts(ctx *model.Context) error {
 
 		fontDict, err := ctx.DereferenceFontDict(indRef)
 		if err != nil {
-			return fmt.Errorf("form font obj#%d: dereference font dict: %w", objNr, err)
+			if ctx.XRefTable.ValidationMode == model.ValidationStrict {
+				return fmt.Errorf("form font obj#%d: dereference font dict: %w", objNr, err)
+			}
+
+			// A broken form font only affects regenerated field appearances,
+			// so relaxed mode skips it like a broken page font resource.
+			fontDict = nil
 		}
 		if fontDict == nil {
 			continue
