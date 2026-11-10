@@ -485,66 +485,60 @@ func TestOptimizeXRefTableContentErrorIncludesDeepPageContext(t *testing.T) {
 	}
 }
 
-func TestCacheFormFontsErrorIncludesFormFontObjectContext(t *testing.T) {
-	ctx := testOptimizeContext(t)
-	objNr, err := ctx.InsertObject(types.Dict{
-		"Type":    types.Name("Font"),
-		"Subtype": types.Name("Type1"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx.Form = types.Dict{
-		"DR": types.Dict{
-			"Font": types.Dict{
-				"F1": *types.NewIndirectRef(objNr, 0),
-			},
-		},
-	}
+// Form fonts only feed regenerated field appearances: relaxed mode skips a
+// broken one, strict mode reports it with the object context.
+func TestCacheFormFontsSkipsBrokenFormFontInRelaxedMode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		form func(ctx *model.Context) (types.Dict, string)
+	}{
+		{"font is a stream", func(ctx *model.Context) (types.Dict, string) {
+			objNr := insertTestObject(t, ctx, types.StreamDict{Dict: types.Dict{}})
+			return types.Dict{"DR": types.Dict{"Font": types.Dict{"F1": *types.NewIndirectRef(objNr, 0)}}},
+				fmt.Sprintf("form font obj#%d: dereference font dict", objNr)
+		}},
+		{"font has no name", func(ctx *model.Context) (types.Dict, string) {
+			objNr := insertTestObject(t, ctx, types.Dict{"Type": types.Name("Font"), "Subtype": types.Name("Type1")})
+			return types.Dict{"DR": types.Dict{"Font": types.Dict{"F1": *types.NewIndirectRef(objNr, 0)}}},
+				fmt.Sprintf("form font obj#%d: parse font name", objNr)
+		}},
+		{"DR is not a dictionary", func(ctx *model.Context) (types.Dict, string) {
+			return types.Dict{"DR": types.Integer(1)}, "form font resources"
+		}},
+		{"DR font is not a dictionary", func(ctx *model.Context) (types.Dict, string) {
+			return types.Dict{"DR": types.Dict{"Font": types.Array{}}}, "form font resources"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, mode := range []int{model.ValidationRelaxed, model.ValidationStrict} {
+				ctx := testOptimizeContext(t)
+				ctx.XRefTable.ValidationMode = mode
+				var want string
+				ctx.Form, want = tc.form(ctx)
 
-	err = CacheFormFonts(ctx)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	want := fmt.Sprintf("form font obj#%d: parse font name", objNr)
-	if !strings.Contains(err.Error(), want) {
-		t.Fatalf("expected form font context, got %q", err.Error())
+				err := CacheFormFonts(ctx)
+				if mode == model.ValidationStrict {
+					if err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("strict: expected %q, got %v", want, err)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("relaxed: unexpected error: %v", err)
+				}
+				if len(ctx.Optimize.FormFontObjects) != 0 {
+					t.Fatal("relaxed: broken form font must not be cached")
+				}
+			}
+		})
 	}
 }
 
-func TestCacheFormFontsSkipsNonDictFontInRelaxedMode(t *testing.T) {
-	for _, tc := range []struct {
-		mode    int
-		wantErr bool
-	}{
-		{mode: model.ValidationRelaxed},
-		{mode: model.ValidationStrict, wantErr: true},
-	} {
-		ctx := testOptimizeContext(t)
-		ctx.XRefTable.ValidationMode = tc.mode
-		objNr, err := ctx.InsertObject(types.StreamDict{Dict: types.Dict{}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx.Form = types.Dict{
-			"DR": types.Dict{
-				"Font": types.Dict{"F1": *types.NewIndirectRef(objNr, 0)},
-			},
-		}
-
-		err = CacheFormFonts(ctx)
-		if tc.wantErr {
-			want := fmt.Sprintf("form font obj#%d: dereference font dict", objNr)
-			if err == nil || !strings.Contains(err.Error(), want) {
-				t.Fatalf("mode %d: expected %q, got %v", tc.mode, want, err)
-			}
-			continue
-		}
-		if err != nil {
-			t.Fatalf("mode %d: unexpected error: %v", tc.mode, err)
-		}
-		if len(ctx.Optimize.FormFontObjects) != 0 {
-			t.Fatalf("mode %d: broken form font must not be cached", tc.mode)
-		}
+func insertTestObject(t *testing.T, ctx *model.Context, o types.Object) int {
+	t.Helper()
+	objNr, err := ctx.InsertObject(o)
+	if err != nil {
+		t.Fatal(err)
 	}
+	return objNr
 }

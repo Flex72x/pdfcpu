@@ -1810,10 +1810,19 @@ func fixReferencesToFreeObjects(c context.Context, ctx *model.Context) error {
 }
 
 // CacheFormFonts caches form fonts referenced by ctx.
+//
+// Form fonts only feed regenerated field appearances, never page rendering.
+// Relaxed mode therefore skips a broken form font resource like a broken page
+// font resource; strict mode reports it.
 func CacheFormFonts(ctx *model.Context) error {
+	strict := ctx.XRefTable.ValidationMode == model.ValidationStrict
+
 	d, err := primitives.FormFontResDict(ctx.XRefTable)
 	if err != nil {
-		return fmt.Errorf("form font resources: %w", err)
+		if strict {
+			return fmt.Errorf("form font resources: %w", err)
+		}
+		return nil
 	}
 
 	// Iterate over font resource dict.
@@ -1836,13 +1845,10 @@ func CacheFormFonts(ctx *model.Context) error {
 
 		fontDict, err := ctx.DereferenceFontDict(indRef)
 		if err != nil {
-			if ctx.XRefTable.ValidationMode == model.ValidationStrict {
+			if strict {
 				return fmt.Errorf("form font obj#%d: dereference font dict: %w", objNr, err)
 			}
-
-			// A broken form font only affects regenerated field appearances,
-			// so relaxed mode skips it like a broken page font resource.
-			fontDict = nil
+			continue
 		}
 		if fontDict == nil {
 			continue
@@ -1855,7 +1861,10 @@ func CacheFormFonts(ctx *model.Context) error {
 		// Get the unique font name.
 		prefix, fName, err := pdffont.Name(ctx.XRefTable, fontDict, objNr)
 		if err != nil {
-			return fmt.Errorf("form font obj#%d: parse font name: %w", objNr, err)
+			if strict {
+				return fmt.Errorf("form font obj#%d: parse font name: %w", objNr, err)
+			}
+			continue
 		}
 
 		if log.OptimizeEnabled() {

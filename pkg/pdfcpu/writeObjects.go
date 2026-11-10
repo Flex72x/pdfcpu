@@ -747,7 +747,12 @@ func writeDeepDict(c context.Context, ctx *model.Context, d types.Dict, objNr, g
 	}
 	dictType, _, err := ctx.DereferenceNameEntry(d, "Type")
 	if err != nil {
-		return fmt.Errorf("write dict obj#%d gen#%d Type: %w", objNr, genNr, err)
+		if ctx.XRefTable.ValidationMode == model.ValidationStrict {
+			return fmt.Errorf("write dict obj#%d gen#%d Type: %w", objNr, genNr, err)
+		}
+		// Relaxed validation already accepted this dictionary; /Type only
+		// selects the page validity check, which a non-name type never needs.
+		dictType = nil
 	}
 	if dictType != nil && dictType.Value() == "Page" {
 		valid, err := ctx.IsObjValid(objNr, genNr)
