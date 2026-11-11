@@ -1049,6 +1049,47 @@ func processXObjectResources(c context.Context, ctx *model.Context, obj types.Ob
 	return nil
 }
 
+// processPatternResources registers the resources of the tiling patterns in a
+// Pattern resource dict. Documents were accepted before patterns were
+// traversed, so a malformed pattern is left alone instead of failing the
+// document; only cancellation is reported.
+func processPatternResources(c context.Context, ctx *model.Context, obj types.Object, pageNr, pageObjNumber int, rNamePrefix string, vis visitedRefs) error {
+	d, err := ctx.DereferenceDict(obj)
+	if err != nil || d == nil {
+		return contextutil.Check(c)
+	}
+
+	var pushed []types.IndirectRef
+	defer func() { vis.pop(pushed) }()
+
+	for rName, v := range d {
+		if err := contextutil.Check(c); err != nil {
+			return err
+		}
+		indRef, ok := v.(types.IndirectRef)
+		if !ok || vis.has(indRef) {
+			continue
+		}
+		// Shading patterns are plain dicts; only tiling patterns are streams.
+		sd, _, err := ctx.DereferenceStreamDict(indRef)
+		if err != nil || sd == nil {
+			continue
+		}
+		resources, found := sd.Find("Resources")
+		if !found || formResourcesVisited(ctx, pageNr, int(indRef.ObjectNumber)) {
+			continue
+		}
+		vis.push(indRef)
+		pushed = append(pushed, indRef)
+		if err := optimizeFormResources(c, ctx, resources, pageNr, pageObjNumber, qualifiedRName(rNamePrefix, rName), vis); err != nil {
+			if cancelled := contextutil.Check(c); cancelled != nil {
+				return cancelled
+			}
+		}
+	}
+	return nil
+}
+
 func processExtGStateResources(c context.Context, ctx *model.Context, obj types.Object, pageNr, pageObjNumber int, rNamePrefix string, visitedRes visitedRefs) error {
 	d, err := ctx.DereferenceDict(obj)
 	if err != nil {
@@ -1097,6 +1138,15 @@ func optimizeResources(c context.Context, ctx *model.Context, resourcesDict type
 		// Process XObject resource dict, get rid of redundant images.
 		if err := processXObjectResources(c, ctx, obj, pageNr, pageObjNumber, rNamePrefix, visitedRes); err != nil {
 			return fmt.Errorf("XObject: %w", err)
+		}
+	}
+
+	obj, found = resourcesDict.Find("Pattern")
+	if found {
+		// Tiling patterns paint with their own resources; generators that place
+		// a picture as a pattern fill keep the page's images there.
+		if err := processPatternResources(c, ctx, obj, pageNr, pageObjNumber, rNamePrefix, visitedRes); err != nil {
+			return err
 		}
 	}
 

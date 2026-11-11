@@ -542,3 +542,53 @@ func insertTestObject(t *testing.T, ctx *model.Context, o types.Object) int {
 	}
 	return objNr
 }
+
+func TestOptimizeXRefTableRegistersTilingPatternImages(t *testing.T) {
+	ctx := testOptimizeContext(t)
+	ctx.Conf.OptimizeResourceDicts = false
+	pageDict := addOptimizeTestPage(t, ctx)
+
+	image, err := ctx.NewStreamDictForBuf([]byte{0x80})
+	if err != nil {
+		t.Fatal(err)
+	}
+	image.InsertName("Type", "XObject")
+	image.InsertName("Subtype", "Image")
+	image.InsertInt("Width", 1)
+	image.InsertInt("Height", 1)
+	image.InsertInt("BitsPerComponent", 8)
+	image.InsertName("ColorSpace", "DeviceGray")
+	imageRef, err := ctx.IndRefForNewObject(*image)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pattern, err := ctx.NewStreamDictForBuf([]byte("/Im0 Do"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pattern.InsertInt("PatternType", 1)
+	pattern.Insert("Resources", types.Dict{"XObject": types.Dict{"Im0": *imageRef}})
+	patternRef, err := ctx.IndRefForNewObject(*pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pageDict["Resources"] = types.Dict{
+		"Pattern": types.Dict{
+			"P1": *patternRef,
+			// A shading pattern is a plain dict and a broken entry is not a
+			// stream: neither may fail the document.
+			"P2": types.Dict{"PatternType": types.Integer(2)},
+			"P3": *types.NewIndirectRef(999, 0),
+		},
+	}
+
+	if err := OptimizeXRefTable(t.Context(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	number := imageRef.ObjectNumber.Value()
+	if ctx.Optimize.ImageObjects[number] == nil || !ctx.Optimize.PageImages[0][number] {
+		t.Fatalf("pattern image not registered: objects %v page images %v", ctx.Optimize.ImageObjects, ctx.Optimize.PageImages)
+	}
+}
