@@ -842,6 +842,11 @@ func writeDeepArray(c context.Context, ctx *model.Context, a types.Array, objNr,
 }
 
 func writeLazyObjectStreamObject(ctx *model.Context, objNr, genNr int, o types.LazyObjectStreamObject) error {
+	ok, err := writeToObjectStream(ctx, objNr, genNr)
+	if err != nil || ok {
+		return err
+	}
+
 	data, err := o.GetData()
 	if err != nil {
 		return err

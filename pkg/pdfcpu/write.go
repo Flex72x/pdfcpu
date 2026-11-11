@@ -37,6 +37,12 @@ import (
 )
 
 func writeObjects(c context.Context, ctx *model.Context) error {
+	// Every object that may live in an object stream is written into one: a
+	// document with hundreds of thousands of small dictionaries (CAD layers,
+	// structure elements) is several times smaller this way and far cheaper
+	// for the next reader to parse.
+	ctx.Write.WriteToObjectStream = true
+
 	// Write root object(aka the document catalog) and page tree.
 	if err := writeRootObject(c, ctx); err != nil {
 		return err
@@ -57,6 +63,11 @@ func writeObjects(c context.Context, ctx *model.Context) error {
 
 	// Write offspec additional streams as declared in pdf trailer.
 	if err := writeAdditionalStreams(c, ctx); err != nil {
+		return err
+	}
+
+	// The encryption dictionary shall not be part of an object stream.
+	if err := stopObjectStream(ctx); err != nil {
 		return err
 	}
 
@@ -291,17 +302,6 @@ func writeRootEntry(c context.Context, ctx *model.Context, d types.Dict, dictNam
 	return nil
 }
 
-// Write root entry to object stream.
-func writeRootEntryToObjStream(c context.Context, ctx *model.Context, d types.Dict, dictName, entryName string, statsAttr int) error {
-	ctx.Write.WriteToObjectStream = true
-
-	if err := writeRootEntry(c, ctx, d, dictName, entryName, statsAttr); err != nil {
-		return err
-	}
-
-	return stopObjectStream(ctx)
-}
-
 // Write page tree.
 func writePages(c context.Context, ctx *model.Context, rootDict types.Dict) error {
 	if err := contextutil.Check(c); err != nil {
@@ -313,16 +313,10 @@ func writePages(c context.Context, ctx *model.Context, rootDict types.Dict) erro
 		return errors.New("missing indirect obj for pages dict")
 	}
 
-	// Embed all page tree objects into objects stream.
-	ctx.Write.WriteToObjectStream = true
-
 	// Write page tree.
 	p := 0
-	if _, _, err := writePagesDict(c, ctx, indRef, &p); err != nil {
-		return err
-	}
-
-	return stopObjectStream(ctx)
+	_, _, err := writePagesDict(c, ctx, indRef, &p)
+	return err
 }
 
 func writeRootAttrsBatch1(c context.Context, ctx *model.Context, d types.Dict, dictName string) error {
@@ -450,9 +444,7 @@ func writeRootObject(c context.Context, ctx *model.Context) error {
 		return err
 	}
 
-	if err = writeRootEntryToObjStream(
-		c, ctx, d, dictName, "StructTreeRoot", model.RootStructTreeRoot,
-	); err != nil {
+	if err = writeRootEntry(c, ctx, d, dictName, "StructTreeRoot", model.RootStructTreeRoot); err != nil {
 		return err
 	}
 
