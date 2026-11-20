@@ -1511,7 +1511,7 @@ func TestReadLargeDictObject(t *testing.T) {
 
 // TestReadStreamContentRejectsStreamLimit verifies stream limits are enforced.
 func TestReadStreamContentRejectsStreamLimit(t *testing.T) {
-	_, err := readStreamContent(bytes.NewReader([]byte("abc")), 3, 2)
+	_, err := readStreamContent(bytes.NewReader([]byte("abc")), 3, 3, 2)
 	if err == nil || !strings.Contains(err.Error(), "exceeds maximum") {
 		t.Fatalf("got %v, want stream limit error", err)
 	}
@@ -1520,12 +1520,20 @@ func TestReadStreamContentRejectsStreamLimit(t *testing.T) {
 func TestReadStreamContentAcceptsWrappedEOF(t *testing.T) {
 	rd := &wrappedEOFReader{data: []byte("abc\nendstream\n")}
 
-	buf, err := readStreamContent(rd, 20, 20)
+	buf, err := readStreamContent(rd, 20, 20, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(buf) != "abc\n" {
 		t.Fatalf("got %q, want %q", string(buf), "abc\n")
+	}
+}
+
+func TestReadStreamContentRepairsLengthPastEOF(t *testing.T) {
+	data := []byte("abc\nendstream\n")
+	buf, err := readStreamContent(bytes.NewReader(data), 20, int64(len(data)), 20)
+	if err != nil || string(buf) != "abc\n" {
+		t.Fatalf("got %q, %v; want recovered stream", buf, err)
 	}
 }
 

@@ -10,6 +10,16 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
+func TestEqualObjectsCanSkipDeduplicationWithoutError(t *testing.T) {
+	obj := types.Array{types.Array{types.Integer(1)}}
+	conf := NewStatelessConfiguration()
+	conf.Limits.MaxRecursionDepth = 1
+	equal, err := EqualObjects(t.Context(), obj, obj, newXRefTable(conf), nil)
+	if err != nil || equal {
+		t.Fatalf("got (%t, %v), want (false, nil) to keep both objects", equal, err)
+	}
+}
+
 func TestEqualObjectsSupportsEncodedStreamSources(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stream")
 	if err := os.WriteFile(path, []byte("abc"), 0o600); err != nil {

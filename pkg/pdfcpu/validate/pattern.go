@@ -141,6 +141,7 @@ type patternTraversal struct {
 	xRefTable  *model.XRefTable
 	depth      int
 	ancestors  map[int]bool
+	validated  validatedGraph
 	ownerObjNr int
 }
 
@@ -150,7 +151,7 @@ func patternTraversalFromContext(c context.Context, xRefTable *model.XRefTable) 
 			return c, t
 		}
 	}
-	t := &patternTraversal{xRefTable: xRefTable, ancestors: map[int]bool{}}
+	t := &patternTraversal{xRefTable: xRefTable, ancestors: map[int]bool{}, validated: validatedGraph{}}
 	if c == nil {
 		return nil, t
 	}
@@ -206,12 +207,17 @@ func (t *patternTraversal) validate(c context.Context, o types.Object) (err erro
 	if err := t.xRefTable.CheckRecursionDepth("Pattern graph", depth); err != nil {
 		return err
 	}
+	depths := currentGraphDepths(c)
 	patternObjNr := patternObjectIdentity(o)
 	if err := t.enter(patternObjNr); err != nil {
 		return err
 	}
 	t.depth = depth
 	defer t.leave(patternObjNr)
+
+	if t.validated.alreadyValidated(patternObjNr, depths) {
+		return nil
+	}
 
 	o, err = t.xRefTable.Dereference(o)
 	if err != nil || o == nil {
@@ -238,6 +244,9 @@ func (t *patternTraversal) validate(c context.Context, o types.Object) (err erro
 
 	}
 
+	if err == nil {
+		t.validated.markValidated(patternObjNr, depths)
+	}
 	return err
 }
 

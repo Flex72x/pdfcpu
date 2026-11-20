@@ -163,3 +163,14 @@ Reviewed 91 commits: 50 accepted fully or partially, 41 omitted/deferred. Partia
 | `a9b5201a` validate Indexed lookup lengths with relaxed compatibility | Omit | Reject/defer: additional validation is not needed for processing and is not proven to preserve previously accepted inputs, including relaxed-mode inputs. |
 | `b38e46cc` validate AESV3 crypt-filter lengths with relaxed compatibility | Omit | Reject/defer: additional validation is not needed for processing and is not proven to preserve previously accepted inputs, including relaxed-mode inputs. |
 | `b41a41d5` bump version | Omit | Reject: keep the fork's own version; upstream CI latest-toolchain setting is not a runtime repair. |
+
+## Selected backports from v0.16.4
+
+| Source | Decision | Reason / adaptation |
+|---|---|---|
+| `7653f158` | Accept | Reuse successful shared-graph validation without tightening existing validation or depth limits. |
+| `0bb00190` | Accept | Traverse object graphs iteratively in optimization, annotation removal and page migration. Existing tiling-pattern and inline-image handling remains in the fork. |
+| `d6abb27e` | Adapt | Bound comparison work. On cutoff keep both objects rather than rejecting the file; compare file-backed and in-memory streams through the same `EqualRaw` path. |
+| `70f1a860` | Accept | Fail on an already-invalid bookmark span before enumerating pages. |
+| `82c88cec` | Adapt | Bound the initial stream allocation by the bytes remaining in the input and preserve EOF recovery. Do not impose new cumulative allowances or reject shared object-stream slots. The complete upstream fix is not present. |
+| `c1db2d55`, `8befe54d`, `a9725db6`, `5367e878`, `ebac361a` | Defer | Do not tighten stream decoding, local image paths or poster, create and form input limits without establishing which previously processed inputs would be lost. |

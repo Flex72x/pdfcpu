@@ -3082,8 +3082,17 @@ func readStreamContentBlindly(rd io.Reader, maxStreamBytes int64) (buf []byte, e
 	return buf, nil
 }
 
-// Reads and returns a file buffer with length = stream length using provided reader positioned at offset.
-func readStreamContent(rd io.Reader, streamLength int, maxStreamBytes int64) ([]byte, error) {
+func streamDataBeforeEOF(buf []byte, err error) ([]byte, error) {
+	before, _, found := bytes.Cut(buf, []byte("endstream"))
+	if !found {
+		return nil, err
+	}
+	return bytes.Clone(before), nil
+}
+
+// readStreamContent reads from the stream offset; available is the input size
+// remaining at that offset, not a new limit on supported stream sizes.
+func readStreamContent(rd io.Reader, streamLength int, available, maxStreamBytes int64) ([]byte, error) {
 	if log.ReadEnabled() {
 		log.Read.Printf("readStreamContent: begin streamLength:%d\n", streamLength)
 	}
@@ -3102,12 +3111,13 @@ func readStreamContent(rd io.Reader, streamLength int, maxStreamBytes int64) ([]
 		)
 	}
 
-	buf := make([]byte, streamLength)
+	bufLen := int(min(int64(streamLength), max(available, 0)))
+	buf := make([]byte, bufLen)
 
 	totalCount := 0
-	for totalCount < streamLength {
+	for totalCount < bufLen {
 		count, err := fillBuffer(rd, buf[totalCount:])
-		if count < 0 || count > streamLength-totalCount {
+		if count < 0 || count > bufLen-totalCount {
 			return nil, fmt.Errorf("invalid stream read count=%d", count)
 		}
 		if count > 0 {
@@ -3123,18 +3133,16 @@ func readStreamContent(rd io.Reader, streamLength int, maxStreamBytes int64) ([]
 				return nil, err
 			}
 
-			// Search only the bytes actually read. Searching the whole
-			// preallocated buffer includes zero-filled unread bytes.
-			eob := bytes.Index(buf[:totalCount], []byte("endstream"))
-			if eob < 0 {
-				return nil, err
-			}
-			return buf[:eob], nil
+			return streamDataBeforeEOF(buf[:totalCount], err)
 		}
 
 		if count == 0 {
 			return nil, io.ErrNoProgress
 		}
+	}
+
+	if bufLen < streamLength {
+		return streamDataBeforeEOF(buf, io.EOF)
 	}
 
 	if log.ReadEnabled() {
@@ -3227,7 +3235,7 @@ func loadEncodedStreamContent(c context.Context, ctx *model.Context, sd *types.S
 	if !fixLength && sd.StreamLength != nil {
 		l1 = int(*sd.StreamLength)
 	}
-	sd.Raw, err = readStreamContent(rd, l1, streamLimit(ctx))
+	sd.Raw, err = readStreamContent(rd, l1, ctx.Read.FileSize-sd.StreamOffset, streamLimit(ctx))
 	if err != nil {
 		return fmt.Errorf("read stream content: %w", err)
 	}
